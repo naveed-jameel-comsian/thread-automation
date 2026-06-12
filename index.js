@@ -21,6 +21,7 @@ const {
   ensureKameleoProfilesForAllAccounts,
   isKameleoEnabled,
   checkKameleoHealth,
+  SCANNER_PROFILE_ID,
 } = require('./lib/browser');
 const { createDashboardServer } = require('./server/dashboard');
 
@@ -629,6 +630,7 @@ async function monitor() {
       await checkKameleoHealth();
       await ensureKameleoProfilesForAllAccounts(listPostingAccounts);
       addLog('success', 'Kameleo connected — one profile per posting account');
+      addLog('info', `Scanner uses Kameleo profile ${SCANNER_PROFILE_ID}`);
     } catch (err) {
       addLog('warn', `Kameleo unavailable: ${err.message}. Posting needs Kameleo CLI at ${process.env.KAMELEO_API_URL || 'http://localhost:5050'}`);
     }
