@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Threads Monitor Dashboard</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div>
+        <h1>Threads Monitor</h1>
+        <p class="subtitle">Track monitored accounts, reposts, and your account activity</p>
+      </div>
+      <div class="status-pill" id="monitorStatus">Starting...</div>
+    </header>
+
+    <section class="grid stats-grid">
+      <article class="card stat-card">
+        <span class="label">Last check</span>
+        <strong id="lastCheckAt">—</strong>
+      </article>
+      <article class="card stat-card">
+        <span class="label">Next check</span>
+        <strong id="nextCheckAt">—</strong>
+      </article>
+      <article class="card stat-card">
+        <span class="label">Total reposts</span>
+        <strong id="totalReposts">0</strong>
+      </article>
+      <article class="card stat-card">
+        <span class="label">Total checks</span>
+        <strong id="totalChecks">0</strong>
+      </article>
+    </section>
+
+    <section class="grid two-col">
+      <article class="card">
+        <div class="card-header">
+          <h2>Last repost</h2>
+        </div>
+        <div id="lastRepost" class="empty-state">No reposts yet</div>
+      </article>
+
+      <article class="card">
+        <div class="card-header">
+          <h2>Our account</h2>
+          <span class="badge" id="ourUsername">—</span>
+        </div>
+        <div id="ourAccount" class="detail-list"></div>
+      </article>
+    </section>
+
+    <section class="card">
+      <div class="card-header">
+        <h2>Monitored accounts</h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Last post</th>
+              <th>Last checked</th>
+              <th>Seen posts</th>
+              <th>Status</th>
+              <th>Preview</th>
+            </tr>
+          </thead>
+          <tbody id="accountsTable"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="grid two-col">
+      <article class="card">
+        <div class="card-header">
+          <h2>Repost history</h2>
+        </div>
+        <div id="repostHistory" class="history-list"></div>
+      </article>
+
+      <article class="card">
+        <div class="card-header">
+          <h2>Activity log</h2>
+        </div>
+        <div id="activityLog" class="log-list"></div>
+      </article>
+    </section>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
