@@ -1,3 +1,27 @@
+let state = null;
+let filter = 'all';
+let search = '';
+
+const els = {
+  subtitle: document.getElementById('subtitle'),
+  monitorBadge: document.getElementById('monitorBadge'),
+  monitorStatus: document.getElementById('monitorStatus'),
+  kpiRow: document.getElementById('kpiRow'),
+  accountsTable: document.getElementById('accountsTable'),
+  sourceAccounts: document.getElementById('sourceAccounts'),
+  lastRepost: document.getElementById('lastRepost'),
+  activityLog: document.getElementById('activityLog'),
+  searchInput: document.getElementById('searchInput'),
+  addAccountBtn: document.getElementById('addAccountBtn'),
+  addAccountModal: document.getElementById('addAccountModal'),
+  addAccountForm: document.getElementById('addAccountForm'),
+  closeModalBtn: document.getElementById('closeModalBtn'),
+  cancelModalBtn: document.getElementById('cancelModalBtn'),
+  tabAll: document.getElementById('tabAll'),
+  tabAttention: document.getElementById('tabAttention'),
+  tabLive: document.getElementById('tabLive'),
+};
+
 function formatTime(value) {
   if (!value) return '—';
   const date = new Date(value);
@@ -7,162 +31,276 @@ function formatTime(value) {
 
 function formatRelative(value) {
   if (!value) return '—';
-  const date = new Date(value);
-  const diffMs = date.getTime() - Date.now();
+  const diffMs = new Date(value).getTime() - Date.now();
   const abs = Math.abs(diffMs);
   const mins = Math.round(abs / 60000);
-  if (mins < 60) return diffMs >= 0 ? `in ${mins}m` : `${mins}m ago`;
+  if (mins < 60) return diffMs >= 0 ? `in ${mins}m` : `${mins}m`;
   const hours = Math.round(mins / 60);
-  if (hours < 48) return diffMs >= 0 ? `in ${hours}h` : `${hours}h ago`;
-  return formatTime(value);
+  if (hours < 48) return diffMs >= 0 ? `in ${hours}h` : `${hours}h`;
+  const days = Math.round(hours / 24);
+  return diffMs >= 0 ? `in ${days}d` : `${days}d`;
 }
 
-function truncate(text, max = 120) {
-  if (!text) return '—';
-  return text.length > max ? `${text.slice(0, max)}...` : text;
+function formatMetric(value) {
+  if (value === null || value === undefined) return '—';
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`;
+  return String(value);
 }
 
-function renderLastRepost(lastRepost) {
-  const el = document.getElementById('lastRepost');
-  if (!lastRepost) {
-    el.className = 'empty-state';
-    el.textContent = 'No reposts yet';
-    return;
+function initials(name) {
+  return (name || '?').slice(0, 2).toUpperCase();
+}
+
+function reachClass(reach) {
+  if (reach === null || reach === undefined) return '';
+  if (reach >= 70) return 'reach-good';
+  if (reach >= 40) return 'reach-mid';
+  return 'reach-low';
+}
+
+function getPostingAccounts() {
+  return Object.values(state?.postingAccounts || {});
+}
+
+function filterAccounts(accounts) {
+  let list = accounts;
+
+  if (search) {
+    const q = search.toLowerCase();
+    list = list.filter((a) =>
+      a.username.toLowerCase().includes(q)
+      || (a.displayName || '').toLowerCase().includes(q),
+    );
   }
 
-  el.className = 'detail-list';
-  el.innerHTML = `
-    <div class="detail-row">
-      <span class="label">Time</span>
-      <strong>${formatTime(lastRepost.at)} (${formatRelative(lastRepost.at)})</strong>
-    </div>
-    <div class="detail-row">
-      <span class="label">Source</span>
-      <strong>@${lastRepost.sourceUsername || 'unknown'}</strong>
-      ${lastRepost.sourcePostUrl ? `<a href="${lastRepost.sourcePostUrl}" target="_blank" rel="noreferrer">View original</a>` : ''}
-    </div>
-    <div class="detail-row">
-      <span class="label">Status</span>
-      <strong class="${lastRepost.success ? 'status-ok' : 'status-error'}">${lastRepost.success ? 'Success' : 'Failed'}</strong>
-    </div>
-    <div class="detail-row">
-      <span class="label">Media</span>
-      <strong>${lastRepost.mediaCount || 0} file(s)</strong>
-    </div>
-    <div class="detail-row">
-      <span class="label">Content</span>
-      <div class="preview">${truncate(lastRepost.repostText, 400)}</div>
-    </div>
+  if (filter === 'attention') {
+    list = list.filter((a) => ['stalled', 'blocked', 'error', 'shadowban'].includes(a.status));
+  } else if (filter === 'live') {
+    list = list.filter((a) => a.status === 'smooth' && !a.paused);
+  }
+
+  return list;
+}
+
+function renderKpis(summary) {
+  const s = summary || {};
+  els.kpiRow.innerHTML = `
+    <div class="kpi running"><div class="kpi-label">Running</div><div class="kpi-value">${s.running ?? 0}</div></div>
+    <div class="kpi at-risk"><div class="kpi-label">At risk</div><div class="kpi-value">${s.atRisk ?? 0}</div></div>
+    <div class="kpi down"><div class="kpi-label">Down</div><div class="kpi-value">${s.down ?? 0}</div></div>
+    <div class="kpi views"><div class="kpi-label">Views 24h</div><div class="kpi-value">${formatMetric(s.views24h)}</div></div>
+    <div class="kpi follows"><div class="kpi-label">Net follows 24h</div><div class="kpi-value">${s.netFollows24h != null ? (s.netFollows24h >= 0 ? '+' : '') + formatMetric(s.netFollows24h) : '—'}</div></div>
+    <div class="kpi failed"><div class="kpi-label">Failed 24h</div><div class="kpi-value">${s.failed24h ?? 0}</div></div>
   `;
 }
 
-function renderOurAccount(ourAccount) {
-  document.getElementById('ourUsername').textContent = ourAccount.username ? `@${ourAccount.username}` : 'Detecting...';
-  document.getElementById('ourAccount').innerHTML = `
-    <div class="detail-row">
-      <span class="label">Last post time</span>
-      <strong>${formatTime(ourAccount.lastPostAt)}</strong>
-      <span class="preview">${formatRelative(ourAccount.lastPostAt)}</span>
+function renderAccountsTable() {
+  const accounts = filterAccounts(getPostingAccounts());
+
+  if (!accounts.length) {
+    els.accountsTable.innerHTML = `<tr><td colspan="10" class="empty">No posting accounts yet — click "+ Add account"</td></tr>`;
+    return;
+  }
+
+  els.accountsTable.innerHTML = accounts.map((a) => {
+    const status = a.paused ? 'paused' : (a.status || 'pending');
+    const nextLate = a.nextPostAt && new Date(a.nextPostAt) < new Date();
+    const delta = a.followerDelta;
+    const deltaHtml = delta != null
+      ? `<span class="${delta >= 0 ? 'delta-up' : 'delta-down'}">${delta >= 0 ? '+' : ''}${delta}</span>`
+      : '';
+
+    return `
+      <tr>
+        <td>
+          <div class="account-cell">
+            <div class="avatar">${initials(a.username)}</div>
+            <div>
+              <div class="account-name">${a.displayName || a.username}</div>
+              <div class="account-handle">@${a.username}</div>
+            </div>
+          </div>
+        </td>
+        <td><span class="status-pill status-${status}"><span class="status-dot"></span>${status}</span></td>
+        <td class="${reachClass(a.reach)}">${a.reach != null ? `${a.reach}%` : '—'}</td>
+        <td>${formatMetric(a.views24h)}</td>
+        <td>${formatMetric(a.likes24h)}</td>
+        <td>
+          <div class="followers-cell">
+            <span>${a.followers || '—'}</span>
+            ${deltaHtml}
+          </div>
+        </td>
+        <td>${formatRelative(a.lastPostAt)}</td>
+        <td class="${nextLate ? 'late' : ''}">${a.nextPostAt ? (nextLate ? `${formatRelative(a.nextPostAt)} late` : formatRelative(a.nextPostAt)) : '—'}</td>
+        <td>${a.postsToday ?? 0}</td>
+        <td>
+          <div class="row-actions">
+            <button class="icon-btn" title="${a.paused ? 'Resume' : 'Pause'}" data-action="toggle" data-username="${a.username}">${a.paused ? '▶' : '⏸'}</button>
+            <button class="icon-btn" title="Remove" data-action="remove" data-username="${a.username}">🗑</button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function renderSourceAccounts() {
+  const sources = Object.values(state?.sourceAccounts || {});
+  if (!sources.length) {
+    els.sourceAccounts.innerHTML = '<div class="empty">No source accounts</div>';
+    return;
+  }
+
+  els.sourceAccounts.innerHTML = sources.map((s) => `
+    <div class="source-item">
+      <strong>@${s.username}</strong>
+      <div>Last post: ${formatRelative(s.lastPostAt)}</div>
+      <div>Checked: ${formatRelative(s.lastCheckedAt)}</div>
+      <div>Seen: ${s.totalSeenPosts ?? 0} posts</div>
     </div>
-    <div class="detail-row">
-      <span class="label">Last checked</span>
-      <strong>${formatTime(ourAccount.lastCheckedAt)}</strong>
-    </div>
-    <div class="detail-row">
-      <span class="label">Last post preview</span>
-      <div class="preview">${truncate(ourAccount.lastPostText, 300)}</div>
-      ${ourAccount.lastPostUrl ? `<a href="${ourAccount.lastPostUrl}" target="_blank" rel="noreferrer">View post</a>` : ''}
-    </div>
+  `).join('');
+}
+
+function renderLastRepost() {
+  const r = state?.lastRepost;
+  if (!r) {
+    els.lastRepost.className = 'empty';
+    els.lastRepost.textContent = 'No reposts yet';
+    return;
+  }
+
+  els.lastRepost.className = 'source-item';
+  els.lastRepost.innerHTML = `
+    <div><strong>${r.success ? 'Success' : 'Failed'}</strong> · ${formatTime(r.at)}</div>
+    <div>From @${r.sourceUsername || '?'} → @${r.targetUsername || '?'}</div>
+    <div>${(r.repostText || '').slice(0, 200)}${(r.repostText || '').length > 200 ? '...' : ''}</div>
   `;
 }
 
-function renderAccounts(accounts) {
-  const tbody = document.getElementById('accountsTable');
-  const rows = Object.values(accounts || {});
-
-  if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No monitored accounts</td></tr>';
+function renderActivity() {
+  const log = state?.activityLog || [];
+  if (!log.length) {
+    els.activityLog.innerHTML = '<div class="empty">No activity yet</div>';
     return;
   }
 
-  tbody.innerHTML = rows.map((account) => `
-    <tr>
-      <td><a href="https://www.threads.com/@${account.username}" target="_blank" rel="noreferrer">@${account.username}</a></td>
-      <td>
-        <div>${formatTime(account.lastPostAt)}</div>
-        <div class="preview">${formatRelative(account.lastPostAt)}</div>
-      </td>
-      <td>${formatTime(account.lastCheckedAt)}</td>
-      <td>${account.totalSeenPosts ?? 0}</td>
-      <td class="status-${account.status || 'pending'}">${account.status || 'pending'}${account.lastError ? `<div class="preview">${truncate(account.lastError, 80)}</div>` : ''}</td>
-      <td class="preview-cell">
-        ${truncate(account.lastPostText, 100)}
-        ${account.lastPostUrl ? `<div><a href="${account.lastPostUrl}" target="_blank" rel="noreferrer">Open</a></div>` : ''}
-      </td>
-    </tr>
-  `).join('');
-}
-
-function renderHistory(history) {
-  const el = document.getElementById('repostHistory');
-  if (!history?.length) {
-    el.innerHTML = '<div class="empty-state">No repost history yet</div>';
-    return;
-  }
-
-  el.innerHTML = history.map((item) => `
-    <div class="history-item ${item.success ? '' : 'failed'}">
-      <div class="history-meta">
-        <span>@${item.sourceUsername || 'unknown'} · ${formatTime(item.at)}</span>
-        <span class="${item.success ? 'status-ok' : 'status-error'}">${item.success ? 'ok' : 'failed'}</span>
-      </div>
-      <div class="preview">${truncate(item.repostText, 180)}</div>
-    </div>
-  `).join('');
-}
-
-function renderLog(log) {
-  const el = document.getElementById('activityLog');
-  if (!log?.length) {
-    el.innerHTML = '<div class="empty-state">No activity yet</div>';
-    return;
-  }
-
-  el.innerHTML = log.map((item) => `
-    <div class="log-item ${item.level || 'info'}">
-      <div class="log-meta">
-        <span>${formatTime(item.at)}</span>
-        <span>${item.level || 'info'}</span>
-      </div>
+  els.activityLog.innerHTML = log.slice(0, 20).map((item) => `
+    <div class="log-item">
+      <div style="color:var(--muted);font-size:0.78rem">${formatTime(item.at)} · ${item.level}</div>
       <div>${item.message}</div>
     </div>
   `).join('');
 }
 
-function render(state) {
-  const statusEl = document.getElementById('monitorStatus');
-  statusEl.textContent = state.monitorStatus || 'unknown';
-  statusEl.className = `status-pill ${state.monitorStatus || 'starting'}`;
+function render() {
+  if (!state) return;
 
-  document.getElementById('lastCheckAt').textContent = formatTime(state.lastCheckAt);
-  document.getElementById('nextCheckAt').textContent = `${formatTime(state.nextCheckAt)} (${formatRelative(state.nextCheckAt)})`;
-  document.getElementById('totalReposts').textContent = state.stats?.totalReposts ?? 0;
-  document.getElementById('totalChecks').textContent = state.stats?.totalChecks ?? 0;
+  const summary = state.summary || {};
+  const total = getPostingAccounts().length;
+  const attention = getPostingAccounts().filter((a) => ['stalled', 'blocked', 'error', 'shadowban'].includes(a.status)).length;
+  const live = getPostingAccounts().filter((a) => a.status === 'smooth' && !a.paused).length;
 
-  renderLastRepost(state.lastRepost);
-  renderOurAccount(state.ourAccount || {});
-  renderAccounts(state.accounts);
-  renderHistory(state.repostHistory);
-  renderLog(state.activityLog);
+  els.subtitle.textContent = `${total} accounts · auto-reposting trading signals · monitoring ${state.monitoredAccounts?.length || 0} sources`;
+  els.monitorStatus.textContent = state.monitorStatus || 'unknown';
+  els.monitorBadge.className = `monitor-badge ${state.monitorStatus || 'starting'}`;
+
+  els.tabAll.textContent = total;
+  els.tabAttention.textContent = attention;
+  els.tabLive.textContent = live;
+
+  renderKpis(summary);
+  renderAccountsTable();
+  renderSourceAccounts();
+  renderLastRepost();
+  renderActivity();
 }
+
+async function togglePause(username) {
+  const account = state.postingAccounts[username];
+  await fetch(`/api/accounts/${username}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paused: !account?.paused }),
+  });
+}
+
+async function removeAccount(username) {
+  if (!confirm(`Remove @${username} and delete its cookies/browser data?`)) return;
+  await fetch(`/api/accounts/${username}`, { method: 'DELETE' });
+}
+
+els.accountsTable.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  const username = btn.dataset.username;
+  if (btn.dataset.action === 'toggle') togglePause(username);
+  if (btn.dataset.action === 'remove') removeAccount(username);
+});
+
+document.querySelectorAll('.tab').forEach((tab) => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach((t) => t.classList.remove('active'));
+    tab.classList.add('active');
+    filter = tab.dataset.filter;
+    renderAccountsTable();
+  });
+});
+
+els.searchInput.addEventListener('input', (e) => {
+  search = e.target.value.trim();
+  renderAccountsTable();
+});
+
+function openModal() {
+  els.addAccountModal.showModal();
+}
+
+function closeModal() {
+  els.addAccountModal.close();
+  els.addAccountForm.reset();
+}
+
+els.addAccountBtn.addEventListener('click', openModal);
+els.closeModalBtn.addEventListener('click', closeModal);
+els.cancelModalBtn.addEventListener('click', closeModal);
+
+els.addAccountForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const username = document.getElementById('accountUsername').value.trim();
+  const cookiesRaw = document.getElementById('accountCookies').value.trim();
+
+  let cookies;
+  try {
+    cookies = JSON.parse(cookiesRaw);
+  } catch {
+    alert('Cookies must be valid JSON array');
+    return;
+  }
+
+  const res = await fetch('/api/accounts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, cookies }),
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    alert(data.error || 'Failed to add account');
+    return;
+  }
+
+  closeModal();
+});
 
 function connect() {
   const source = new EventSource('/api/events');
   source.onmessage = (event) => {
     try {
-      render(JSON.parse(event.data));
+      state = JSON.parse(event.data);
+      render();
     } catch (err) {
-      console.error('Failed to parse dashboard state', err);
+      console.error(err);
     }
   };
   source.onerror = () => {

@@ -3,69 +3,51 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Threads Monitor Dashboard</title>
+  <title>Threads Monitor</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <div class="app">
-    <header class="header">
-      <div>
+    <header class="topbar">
+      <div class="brand">
         <h1>Threads Monitor</h1>
-        <p class="subtitle">Track monitored accounts, reposts, and your account activity</p>
+        <p class="subtitle" id="subtitle">0 accounts · auto-reposting trading signals</p>
       </div>
-      <div class="status-pill" id="monitorStatus">Starting...</div>
+      <div class="monitor-badge" id="monitorBadge">
+        <span class="pulse"></span>
+        <span id="monitorStatus">Starting</span>
+      </div>
     </header>
 
-    <section class="grid stats-grid">
-      <article class="card stat-card">
-        <span class="label">Last check</span>
-        <strong id="lastCheckAt">—</strong>
-      </article>
-      <article class="card stat-card">
-        <span class="label">Next check</span>
-        <strong id="nextCheckAt">—</strong>
-      </article>
-      <article class="card stat-card">
-        <span class="label">Total reposts</span>
-        <strong id="totalReposts">0</strong>
-      </article>
-      <article class="card stat-card">
-        <span class="label">Total checks</span>
-        <strong id="totalChecks">0</strong>
-      </article>
-    </section>
+    <section class="kpi-row" id="kpiRow"></section>
 
-    <section class="grid two-col">
-      <article class="card">
-        <div class="card-header">
-          <h2>Last repost</h2>
-        </div>
-        <div id="lastRepost" class="empty-state">No reposts yet</div>
-      </article>
-
-      <article class="card">
-        <div class="card-header">
-          <h2>Our account</h2>
-          <span class="badge" id="ourUsername">—</span>
-        </div>
-        <div id="ourAccount" class="detail-list"></div>
-      </article>
-    </section>
-
-    <section class="card">
-      <div class="card-header">
-        <h2>Monitored accounts</h2>
+    <section class="toolbar">
+      <div class="tabs" id="filterTabs">
+        <button class="tab active" data-filter="all">All <span id="tabAll">0</span></button>
+        <button class="tab" data-filter="attention">Needs attention <span id="tabAttention">0</span></button>
+        <button class="tab" data-filter="live">Live <span id="tabLive">0</span></button>
       </div>
+      <div class="toolbar-right">
+        <input type="search" id="searchInput" class="search" placeholder="Search accounts...">
+        <button class="btn-primary" id="addAccountBtn">+ Add account</button>
+      </div>
+    </section>
+
+    <section class="panel">
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
               <th>Account</th>
-              <th>Last post</th>
-              <th>Last checked</th>
-              <th>Seen posts</th>
               <th>Status</th>
-              <th>Preview</th>
+              <th>Reach</th>
+              <th>Views 24h</th>
+              <th>Likes 24h</th>
+              <th>Followers</th>
+              <th>Last post</th>
+              <th>Next post</th>
+              <th>Today</th>
+              <th></th>
             </tr>
           </thead>
           <tbody id="accountsTable"></tbody>
@@ -73,22 +55,43 @@
       </div>
     </section>
 
-    <section class="grid two-col">
-      <article class="card">
-        <div class="card-header">
-          <h2>Repost history</h2>
-        </div>
-        <div id="repostHistory" class="history-list"></div>
+    <section class="bottom-grid">
+      <article class="panel">
+        <h2>Source accounts</h2>
+        <div id="sourceAccounts" class="source-list"></div>
       </article>
-
-      <article class="card">
-        <div class="card-header">
-          <h2>Activity log</h2>
-        </div>
+      <article class="panel">
+        <h2>Last repost</h2>
+        <div id="lastRepost" class="empty">No reposts yet</div>
+      </article>
+      <article class="panel">
+        <h2>Activity</h2>
         <div id="activityLog" class="log-list"></div>
       </article>
     </section>
   </div>
+
+  <dialog id="addAccountModal" class="modal">
+    <form id="addAccountForm" method="dialog">
+      <header class="modal-header">
+        <h3>Add posting account</h3>
+        <button type="button" class="icon-btn" id="closeModalBtn" aria-label="Close">×</button>
+      </header>
+      <label>
+        <span>Username</span>
+        <input type="text" id="accountUsername" placeholder="galinochka_silver2824" required autocomplete="off">
+      </label>
+      <label>
+        <span>Cookies (JSON array)</span>
+        <textarea id="accountCookies" rows="10" placeholder='[{"name":"sessionid","value":"...","domain":".threads.com"}]' required></textarea>
+      </label>
+      <p class="hint">Cookies → <code>data/accounts/&lt;username&gt;/cookies.json</code>. A Kameleo anti-detect profile is created automatically (Kameleo CLI required on port 5050).</p>
+      <footer class="modal-footer">
+        <button type="button" class="btn-ghost" id="cancelModalBtn">Cancel</button>
+        <button type="submit" class="btn-primary">Add account</button>
+      </footer>
+    </form>
+  </dialog>
 
   <script src="/app.js"></script>
 </body>

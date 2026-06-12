@@ -1,69 +1,38 @@
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('playwright-extra');
-const stealth = require('puppeteer-extra-plugin-stealth');
 const {
   addLog,
-  initAccounts,
+  initSourceAccounts,
+  syncPostingAccounts,
   setMonitorStatus,
   setPollInterval,
   markCheckStart,
   markCheckEnd,
-  updateAccountCheck,
-  updateAccountError,
-  updateOurAccount,
+  updateSourceAccountCheck,
+  updateSourceAccountError,
+  updatePostingAccount,
   recordRepost,
   recordRepostFailure,
 } = require('./lib/store');
+const { listPostingAccounts } = require('./lib/accounts');
+const {
+  getScannerContext,
+  getAccountContext,
+  ensureKameleoProfilesForAllAccounts,
+  isKameleoEnabled,
+  checkKameleoHealth,
+} = require('./lib/browser');
 const { createDashboardServer } = require('./server/dashboard');
-
-chromium.use(stealth());
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const ROOT = path.join(__dirname, '.');
-const USER_DATA_DIR = path.join(ROOT, 'browser-data');
-const COOKIES_FILE = path.join(ROOT, 'cookies.json');
 const SEEN_POSTS_FILE = path.join(ROOT, 'seen-posts.json');
 const MEDIA_DIR = path.join(ROOT, 'data', 'media');
 
 const MONITORED_ACCOUNTS = ['kraven.0309', 'jinnie.3007'];
 const POLL_INTERVAL_MS = 10 * 60 * 1000;
 const DASHBOARD_PORT = Number(process.env.PORT) || 3000;
-const OUR_USERNAME = process.env.OUR_USERNAME || null;
-
-let browserContextPromise = null;
-
-/** Playwright only accepts 'Strict' | 'Lax' | 'None' (Pascal case). */
-function normalizeSameSite(value) {
-  if (value === undefined || value === null || value === '') return 'Lax';
-  const s = String(value).trim();
-  if (s === 'Strict' || s === 'Lax' || s === 'None') return s;
-  const lower = s.toLowerCase();
-  if (lower === 'strict') return 'Strict';
-  if (lower === 'lax') return 'Lax';
-  if (lower === 'none' || lower === 'no_restriction') return 'None';
-  if (lower === 'unspecified' || lower === 'extended' || lower === 'moderate') return 'Lax';
-  return 'Lax';
-}
-
-function normalizeCookies(raw) {
-  if (!Array.isArray(raw)) return [];
-  return raw.map((c) => {
-    const sameSite = normalizeSameSite(c.sameSite);
-    const secure = sameSite === 'None' ? true : c.secure !== false;
-    return {
-      name: c.name,
-      value: String(c.value ?? ''),
-      domain: c.domain || '.facebook.com',
-      path: c.path || '/',
-      expires: typeof c.expires === 'number' ? c.expires : -1,
-      httpOnly: Boolean(c.httpOnly),
-      secure,
-      sameSite,
-    };
-  });
-}
 
 function loadSeenPosts() {
   if (!fs.existsSync(SEEN_POSTS_FILE)) return {};
@@ -98,33 +67,6 @@ function getLatestPost(posts) {
     if (!latest) return post;
     return (post.timestamp || 0) > (latest.timestamp || 0) ? post : latest;
   }, null);
-}
-
-async function loadCookiesIntoContext(context) {
-  if (!fs.existsSync(COOKIES_FILE)) return;
-  let parsed;
-  try {
-    parsed = JSON.parse(fs.readFileSync(COOKIES_FILE, 'utf8'));
-  } catch {
-    return;
-  }
-  const cookies = normalizeCookies(parsed);
-  if (cookies.length) await context.addCookies(cookies);
-}
-
-function getContext() {
-  if (!browserContextPromise) {
-    browserContextPromise = (async () => {
-      const context = await chromium.launchPersistentContext(USER_DATA_DIR, {
-        headless: false,
-        args: ['--disable-blink-features=AutomationControlled'],
-        viewport: { width: 1280, height: 900 },
-      });
-      await loadCookiesIntoContext(context);
-      return context;
-    })();
-  }
-  return browserContextPromise;
 }
 
 function createGraphQLCollector(page) {
@@ -524,43 +466,72 @@ async function createThread(page, text, mediaPaths = [], topic = null) {
   log(`Posted thread: ${text.slice(0, 80)}${text.length > 80 ? '...' : ''}`);
 }
 
-async function fetchOurUsername(page) {
-  if (OUR_USERNAME) return OUR_USERNAME;
-
-  await page.goto('https://www.threads.com', { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await delay(3000);
-
-  const username = await page.evaluate(() => {
-    const profileLink = document.querySelector('a[href^="/@"][role="link"]')
-      || [...document.querySelectorAll('a[href^="/@"]')].find((link) => {
-        const label = (link.getAttribute('aria-label') || '').toLowerCase();
-        return label.includes('profile');
-      });
-    const href = profileLink?.getAttribute('href') || '';
-    const match = href.match(/\/@([^/?#]+)/);
-    return match ? match[1] : null;
-  });
-
-  if (username) {
-    updateOurAccount({ username });
-    addLog('success', `Detected our account: @${username}`);
-  }
-
-  return username;
-}
-
-async function refreshOurAccount(page, username, collector) {
-  if (!username) return;
-
+async function refreshPostingAccountProfile(page, username, collector) {
   const posts = await fetchProfilePosts(page, username, collector);
   const latest = getLatestPost(posts);
 
-  updateOurAccount({
-    username,
+  const profileStats = await page.evaluate(() => {
+    const bodyText = document.body.innerText || '';
+    const followerMatch = bodyText.match(/([\d,.]+[kKmM]?)\s*followers?/i);
+    return { followers: followerMatch ? followerMatch[1] : null };
+  });
+
+  updatePostingAccount(username, {
+    displayName: username,
     lastPostAt: latest ? toIsoTimestamp(latest.timestamp) : null,
     lastPostText: latest?.text || null,
     lastPostUrl: latest?.url || null,
+    followers: profileStats.followers,
+    nextPostAt: stateNextCheck(),
+    status: 'smooth',
+    lastError: null,
   });
+}
+
+function stateNextCheck() {
+  return new Date(Date.now() + POLL_INTERVAL_MS).toISOString();
+}
+
+async function repostToAllAccounts(text, mediaPaths, topic, sourceMeta) {
+  const accounts = listPostingAccounts().filter((a) => !a.paused);
+  if (!accounts.length) {
+    addLog('warn', 'No active posting accounts — add accounts from the dashboard');
+    return false;
+  }
+
+  let anySuccess = false;
+
+  for (const account of accounts) {
+    try {
+      const context = await getAccountContext(account.username);
+      const page = await context.newPage();
+      try {
+        await createThread(page, text, mediaPaths, topic);
+        recordRepost({
+          ...sourceMeta,
+          targetUsername: account.username,
+          repostText: text,
+          topic: topic || null,
+          mediaCount: mediaPaths.length,
+        });
+        addLog('success', `Posted to @${account.username} (from @${sourceMeta.sourceUsername})`);
+        anySuccess = true;
+      } finally {
+        await page.close().catch(() => {});
+      }
+      await delay(4000);
+    } catch (err) {
+      recordRepostFailure({
+        ...sourceMeta,
+        targetUsername: account.username,
+        repostText: text,
+        error: err.message,
+      });
+      addLog('error', `Failed posting to @${account.username}: ${err.message}`);
+    }
+  }
+
+  return anySuccess;
 }
 
 async function checkAccount(page, username, collector) {
@@ -572,7 +543,7 @@ async function checkAccount(page, username, collector) {
   const posts = await fetchProfilePosts(page, username, collector);
   const latest = getLatestPost(posts);
 
-  updateAccountCheck(username, {
+  updateSourceAccountCheck(username, {
     lastPostAt: latest ? toIsoTimestamp(latest.timestamp) : null,
     lastPostId: latest?.id || null,
     lastPostText: latest?.text || null,
@@ -588,7 +559,7 @@ async function checkAccount(page, username, collector) {
     for (const post of posts) accountSeen.add(post.id);
     seenPosts[username] = [...accountSeen];
     saveSeenPosts(seenPosts);
-    updateAccountCheck(username, { totalSeenPosts: accountSeen.size });
+    updateSourceAccountCheck(username, { totalSeenPosts: accountSeen.size });
     addLog('info', `Seeded ${posts.length} existing posts for @${username}`);
     return;
   }
@@ -613,28 +584,25 @@ async function checkAccount(page, username, collector) {
         continue;
       }
 
-      await createThread(page, repostText, mediaPaths, detail.topic);
-      accountSeen.add(post.id);
-      seenPosts[username] = [...accountSeen];
-      saveSeenPosts(seenPosts);
-      updateAccountCheck(username, { totalSeenPosts: accountSeen.size });
-
-      recordRepost({
+      const posted = await repostToAllAccounts(repostText, mediaPaths, detail.topic, {
         sourceUsername: username,
         sourcePostId: post.id,
         sourcePostUrl: detail.url,
         sourcePostAt: toIsoTimestamp(detail.timestamp),
-        topic: detail.topic || null,
-        repostText,
-        mediaCount: mediaPaths.length,
       });
-      addLog('success', `Reposted @${username}/${post.id}`);
+
+      if (posted) {
+        accountSeen.add(post.id);
+        seenPosts[username] = [...accountSeen];
+        saveSeenPosts(seenPosts);
+        updateSourceAccountCheck(username, { totalSeenPosts: accountSeen.size });
+      }
 
       for (const filePath of mediaPaths) {
         fs.unlinkSync(filePath);
       }
 
-      await delay(5000);
+      await delay(3000);
     } catch (err) {
       recordRepostFailure({
         sourceUsername: username,
@@ -651,20 +619,28 @@ async function checkAccount(page, username, collector) {
 
 async function monitor() {
   createDashboardServer(DASHBOARD_PORT);
-  initAccounts(MONITORED_ACCOUNTS);
+  initSourceAccounts(MONITORED_ACCOUNTS);
+  syncPostingAccounts(listPostingAccounts().map((a) => a.username));
   setPollInterval(POLL_INTERVAL_MS);
   setMonitorStatus('starting');
 
-  const context = await getContext();
+  if (isKameleoEnabled()) {
+    try {
+      await checkKameleoHealth();
+      await ensureKameleoProfilesForAllAccounts(listPostingAccounts);
+      addLog('success', 'Kameleo connected — one profile per posting account');
+    } catch (err) {
+      addLog('warn', `Kameleo unavailable: ${err.message}. Posting needs Kameleo CLI at ${process.env.KAMELEO_API_URL || 'http://localhost:5050'}`);
+    }
+  }
+
+  const context = await getScannerContext();
   const page = await context.newPage();
   const collector = createGraphQLCollector(page);
 
-  const ourUsername = await fetchOurUsername(page);
-  if (ourUsername) {
-    await refreshOurAccount(page, ourUsername, collector);
-  }
-
+  const postingAccounts = listPostingAccounts();
   addLog('success', `Monitoring ${MONITORED_ACCOUNTS.map((u) => `@${u}`).join(', ')}`);
+  addLog('info', `${postingAccounts.length} posting account(s) configured`);
   addLog('info', `Poll interval: ${POLL_INTERVAL_MS / 60000} minutes`);
   setMonitorStatus('idle');
 
@@ -675,17 +651,22 @@ async function monitor() {
       try {
         await checkAccount(page, username, collector);
       } catch (err) {
-        updateAccountError(username, err.message);
+        updateSourceAccountError(username, err.message);
         addLog('error', `Error checking @${username}: ${err.message}`);
         console.error(`Error checking @${username}:`, err.message);
       }
     }
 
-    if (ourUsername) {
+    for (const account of listPostingAccounts()) {
+      if (account.paused) continue;
       try {
-        await refreshOurAccount(page, ourUsername, collector);
+        await refreshPostingAccountProfile(page, account.username, collector);
       } catch (err) {
-        addLog('warn', `Could not refresh our account: ${err.message}`);
+        updatePostingAccount(account.username, {
+          status: 'stalled',
+          lastError: err.message,
+        });
+        addLog('warn', `Could not refresh @${account.username}: ${err.message}`);
       }
     }
 
@@ -703,10 +684,3 @@ monitor().catch((err) => {
   process.exit(1);
 });
 
-async function closeBrowser() {
-  if (browserContextPromise) {
-    const context = await browserContextPromise;
-    await context.close().catch(() => {});
-    browserContextPromise = null;
-  }
-}

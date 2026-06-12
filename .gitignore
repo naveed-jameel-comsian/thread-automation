@@ -6,4 +6,3 @@ cookies.json
 .DS_Store
 data/
 seen-posts.json
-data/dashboard-state.json
