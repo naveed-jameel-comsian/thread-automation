@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const fs = require('fs');
 const path = require('path');
 const {
@@ -14,6 +16,7 @@ const {
   updatePostingAccount,
   recordRepost,
   recordRepostFailure,
+  setAutomationEnabled,
 } = require('./lib/store');
 const {
   getScannerContext,
@@ -34,6 +37,14 @@ const MEDIA_DIR = path.join(ROOT, 'data', 'media');
 const MONITORED_ACCOUNTS = ['kraven.0309', 'jinnie.3007'];
 const POLL_INTERVAL_MS = 10 * 60 * 1000;
 const DASHBOARD_PORT = Number(process.env.PORT) || 3000;
+
+function parseEnvBool(value, defaultValue = false) {
+  if (value === undefined || value === null || value === '') return defaultValue;
+  const normalized = String(value).trim().toLowerCase();
+  return ['true', '1', 'yes', 'on'].includes(normalized);
+}
+
+const AUTOMATION_ENABLED = parseEnvBool(process.env.AUTOMATION, false);
 
 function loadSeenPosts() {
   if (!fs.existsSync(SEEN_POSTS_FILE)) return {};
@@ -626,12 +637,7 @@ async function checkAccount(page, username, collector) {
   }
 }
 
-async function monitor() {
-  createDashboardServer(DASHBOARD_PORT);
-  initSourceAccounts(MONITORED_ACCOUNTS);
-  setPollInterval(POLL_INTERVAL_MS);
-  setMonitorStatus('starting');
-
+async function runAutomationLoop() {
   let repostProfiles = [];
 
   if (isKameleoEnabled()) {
@@ -694,7 +700,36 @@ async function monitor() {
   }
 }
 
-monitor().catch((err) => {
+async function start() {
+  createDashboardServer(DASHBOARD_PORT);
+  initSourceAccounts(MONITORED_ACCOUNTS);
+  setPollInterval(POLL_INTERVAL_MS);
+  setAutomationEnabled(AUTOMATION_ENABLED);
+
+  if (!AUTOMATION_ENABLED) {
+    setMonitorStatus('idle');
+    addLog('info', 'Automation disabled (AUTOMATION=false). Dashboard only — no scanning or reposting.');
+
+    if (isKameleoEnabled()) {
+      try {
+        await checkKameleoHealth();
+        const profiles = await syncKameleoDashboardAccounts();
+        addLog('info', `Kameleo: ${profiles.length} profile(s) available for dashboard`);
+      } catch (err) {
+        addLog('warn', `Kameleo unavailable: ${err.message}`);
+      }
+    }
+
+    console.log(`Dashboard: http://localhost:${DASHBOARD_PORT} (automation off)`);
+    return;
+  }
+
+  setMonitorStatus('starting');
+  addLog('info', 'Automation enabled (AUTOMATION=true)');
+  await runAutomationLoop();
+}
+
+start().catch((err) => {
   setMonitorStatus('error');
   addLog('error', `Monitor crashed: ${err.message}`);
   console.error('Monitor error:', err);

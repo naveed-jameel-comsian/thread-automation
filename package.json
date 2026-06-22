@@ -14,6 +14,7 @@
   "dependencies": {
     "@kameleo/local-api-client": "^4.4.1",
     "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
     "express": "^4.21.0",
     "playwright": "^1.49.0",
     "playwright-extra": "^4.3.6",

@@ -217,7 +217,7 @@ function render() {
   const attention = getPostingAccounts().filter((a) => ['stalled', 'blocked', 'error', 'shadowban'].includes(a.status)).length;
   const live = getPostingAccounts().filter((a) => a.postingEnabled && a.status === 'smooth' && !a.paused).length;
 
-  els.subtitle.textContent = `${total} accounts · auto-reposting trading signals · monitoring ${state.monitoredAccounts?.length || 0} sources`;
+  els.subtitle.textContent = `${total} accounts · ${state.automationEnabled ? 'automation on' : 'automation off'} · monitoring ${state.monitoredAccounts?.length || 0} sources`;
   els.monitorStatus.textContent = state.monitorStatus || 'unknown';
   els.monitorBadge.className = `monitor-badge ${state.monitorStatus || 'starting'}`;
 
