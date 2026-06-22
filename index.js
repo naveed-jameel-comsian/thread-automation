@@ -20,7 +20,9 @@ const {
 } = require('./lib/store');
 const {
   getScannerContext,
-  getAccountContext,
+  closeScannerSession,
+  reopenScannerSession,
+  withRepostProfile,
   listRepostProfiles,
   isKameleoEnabled,
   checkKameleoHealth,
@@ -35,7 +37,7 @@ const SEEN_POSTS_FILE = path.join(ROOT, 'seen-posts.json');
 const MEDIA_DIR = path.join(ROOT, 'data', 'media');
 
 const MONITORED_ACCOUNTS = ['kraven.0309', 'jinnie.3007'];
-const POLL_INTERVAL_MS = 10 * 60 * 1000;
+const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MINUTES || 10) * 60 * 1000;
 const DASHBOARD_PORT = Number(process.env.PORT) || 3000;
 
 function parseEnvBool(value, defaultValue = false) {
@@ -523,22 +525,23 @@ async function repostToAllAccounts(text, mediaPaths, topic, sourceMeta) {
 
   for (const profile of targets) {
     try {
-      const context = await getAccountContext(profile.username);
-      const page = await context.newPage();
-      try {
-        await createThread(page, text, mediaPaths, topic);
-        recordRepost({
-          ...sourceMeta,
-          targetUsername: profile.username,
-          repostText: text,
-          topic: topic || null,
-          mediaCount: mediaPaths.length,
-        });
-        addLog('success', `Posted to @${profile.username} (from @${sourceMeta.sourceUsername})`);
-        anySuccess = true;
-      } finally {
-        await page.close().catch(() => {});
-      }
+      await withRepostProfile(profile.username, async (context) => {
+        const page = await context.newPage();
+        try {
+          await createThread(page, text, mediaPaths, topic);
+          recordRepost({
+            ...sourceMeta,
+            targetUsername: profile.username,
+            repostText: text,
+            topic: topic || null,
+            mediaCount: mediaPaths.length,
+          });
+          addLog('success', `Posted to @${profile.username} via Kameleo profile ${profile.id.slice(0, 8)}…`);
+          anySuccess = true;
+        } finally {
+          await page.close().catch(() => {});
+        }
+      });
       await delay(4000);
     } catch (err) {
       recordRepostFailure({
@@ -558,6 +561,7 @@ async function checkAccount(page, username, collector) {
   const seenPosts = loadSeenPosts();
   const accountSeen = new Set(seenPosts[username] || []);
   const isFirstRun = accountSeen.size === 0;
+  const pendingReposts = [];
 
   log(`Checking @${username}...`);
   const posts = await fetchProfilePosts(page, username, collector);
@@ -573,7 +577,7 @@ async function checkAccount(page, username, collector) {
 
   log(`Found ${posts.length} posts on @${username}`);
 
-  if (!posts.length) return;
+  if (!posts.length) return pendingReposts;
 
   if (isFirstRun) {
     for (const post of posts) accountSeen.add(post.id);
@@ -581,13 +585,13 @@ async function checkAccount(page, username, collector) {
     saveSeenPosts(seenPosts);
     updateSourceAccountCheck(username, { totalSeenPosts: accountSeen.size });
     addLog('info', `Seeded ${posts.length} existing posts for @${username}`);
-    return;
+    return pendingReposts;
   }
 
   const newPosts = posts.filter((post) => !accountSeen.has(post.id));
   if (!newPosts.length) {
     addLog('info', `No new posts for @${username}`);
-    return;
+    return pendingReposts;
   }
 
   log(`Found ${newPosts.length} new post(s) for @${username}`);
@@ -604,25 +608,17 @@ async function checkAccount(page, username, collector) {
         continue;
       }
 
-      const posted = await repostToAllAccounts(repostText, mediaPaths, detail.topic, {
+      pendingReposts.push({
         sourceUsername: username,
         sourcePostId: post.id,
         sourcePostUrl: detail.url,
         sourcePostAt: toIsoTimestamp(detail.timestamp),
+        repostText,
+        mediaPaths,
+        topic: detail.topic,
+        seenPosts,
+        accountSeen,
       });
-
-      if (posted) {
-        accountSeen.add(post.id);
-        seenPosts[username] = [...accountSeen];
-        saveSeenPosts(seenPosts);
-        updateSourceAccountCheck(username, { totalSeenPosts: accountSeen.size });
-      }
-
-      for (const filePath of mediaPaths) {
-        fs.unlinkSync(filePath);
-      }
-
-      await delay(3000);
     } catch (err) {
       recordRepostFailure({
         sourceUsername: username,
@@ -631,9 +627,56 @@ async function checkAccount(page, username, collector) {
         repostText: post.text || '',
         error: err.message,
       });
-      addLog('error', `Failed to repost @${username}/${post.id}: ${err.message}`);
-      console.error(`Failed to repost @${username}/${post.id}:`, err.message);
+      addLog('error', `Failed to prepare repost @${username}/${post.id}: ${err.message}`);
+      console.error(`Failed to prepare repost @${username}/${post.id}:`, err.message);
     }
+  }
+
+  return pendingReposts;
+}
+
+async function processPendingReposts(pendingReposts) {
+  if (!pendingReposts.length) return;
+
+  addLog('info', `Scan complete — reposting ${pendingReposts.length} post(s) via Kameleo client profiles`);
+  await closeScannerSession();
+
+  try {
+    for (const job of pendingReposts) {
+      try {
+        const posted = await repostToAllAccounts(
+          job.repostText,
+          job.mediaPaths,
+          job.topic,
+          {
+            sourceUsername: job.sourceUsername,
+            sourcePostId: job.sourcePostId,
+            sourcePostUrl: job.sourcePostUrl,
+            sourcePostAt: job.sourcePostAt,
+          },
+        );
+
+        if (posted) {
+          job.accountSeen.add(job.sourcePostId);
+          job.seenPosts[job.sourceUsername] = [...job.accountSeen];
+          saveSeenPosts(job.seenPosts);
+          updateSourceAccountCheck(job.sourceUsername, {
+            totalSeenPosts: job.accountSeen.size,
+          });
+        }
+
+        for (const filePath of job.mediaPaths) {
+          if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        }
+
+        await delay(3000);
+      } catch (err) {
+        addLog('error', `Repost batch failed for @${job.sourceUsername}/${job.sourcePostId}: ${err.message}`);
+      }
+    }
+  } finally {
+    await reopenScannerSession();
+    addLog('info', 'Scanner profile reopened');
   }
 }
 
@@ -652,8 +695,8 @@ async function runAutomationLoop() {
   }
 
   const context = await getScannerContext();
-  const page = await context.newPage();
-  const collector = createGraphQLCollector(page);
+  let page = await context.newPage();
+  let collector = createGraphQLCollector(page);
 
   addLog('success', `Monitoring ${MONITORED_ACCOUNTS.map((u) => `@${u}`).join(', ')}`);
   addLog('info', `${repostProfiles.length} Kameleo repost profile(s)`);
@@ -663,14 +706,27 @@ async function runAutomationLoop() {
   while (true) {
     markCheckStart();
 
+    const pendingReposts = [];
+
     for (const username of MONITORED_ACCOUNTS) {
       try {
-        await checkAccount(page, username, collector);
+        const queued = await checkAccount(page, username, collector);
+        pendingReposts.push(...queued);
       } catch (err) {
         updateSourceAccountError(username, err.message);
         addLog('error', `Error checking @${username}: ${err.message}`);
         console.error(`Error checking @${username}:`, err.message);
       }
+    }
+
+    await processPendingReposts(pendingReposts);
+
+    if (pendingReposts.length) {
+      await page.close().catch(() => {});
+      collector.detach?.();
+      const scannerContext = await getScannerContext();
+      page = await scannerContext.newPage();
+      collector = createGraphQLCollector(page);
     }
 
     if (isKameleoEnabled()) {
