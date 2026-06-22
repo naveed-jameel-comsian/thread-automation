@@ -76,7 +76,7 @@ function filterAccounts(accounts) {
   if (filter === 'attention') {
     list = list.filter((a) => ['stalled', 'blocked', 'error', 'shadowban'].includes(a.status));
   } else if (filter === 'live') {
-    list = list.filter((a) => a.status === 'smooth' && !a.paused);
+    list = list.filter((a) => a.postingEnabled && a.status === 'smooth' && !a.paused);
   }
 
   return list;
@@ -98,7 +98,7 @@ function renderAccountsTable() {
   const accounts = filterAccounts(getPostingAccounts());
 
   if (!accounts.length) {
-    els.accountsTable.innerHTML = `<tr><td colspan="10" class="empty">No posting accounts yet — click "+ Add account"</td></tr>`;
+    els.accountsTable.innerHTML = `<tr><td colspan="11" class="empty">No posting accounts yet — click "+ Add account"</td></tr>`;
     return;
   }
 
@@ -135,8 +135,13 @@ function renderAccountsTable() {
         <td class="${nextLate ? 'late' : ''}">${a.nextPostAt ? (nextLate ? `${formatRelative(a.nextPostAt)} late` : formatRelative(a.nextPostAt)) : '—'}</td>
         <td>${a.postsToday ?? 0}</td>
         <td>
+          <label class="toggle" title="${a.postingEnabled ? 'Posting enabled' : 'Posting disabled'}">
+            <input type="checkbox" data-action="posting" data-username="${a.username}" ${a.postingEnabled ? 'checked' : ''}>
+            <span class="toggle-slider"></span>
+          </label>
+        </td>
+        <td>
           <div class="row-actions">
-            <button class="icon-btn" title="${a.paused ? 'Resume' : 'Pause'}" data-action="toggle" data-username="${a.username}">${a.paused ? '▶' : '⏸'}</button>
             <button class="icon-btn" title="Remove" data-action="remove" data-username="${a.username}">🗑</button>
           </div>
         </td>
@@ -199,7 +204,7 @@ function render() {
   const summary = state.summary || {};
   const total = getPostingAccounts().length;
   const attention = getPostingAccounts().filter((a) => ['stalled', 'blocked', 'error', 'shadowban'].includes(a.status)).length;
-  const live = getPostingAccounts().filter((a) => a.status === 'smooth' && !a.paused).length;
+  const live = getPostingAccounts().filter((a) => a.postingEnabled && a.status === 'smooth' && !a.paused).length;
 
   els.subtitle.textContent = `${total} accounts · auto-reposting trading signals · monitoring ${state.monitoredAccounts?.length || 0} sources`;
   els.monitorStatus.textContent = state.monitorStatus || 'unknown';
@@ -216,26 +221,21 @@ function render() {
   renderActivity();
 }
 
-async function togglePause(username) {
-  const account = state.postingAccounts[username];
-  await fetch(`/api/accounts/${username}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ paused: !account?.paused }),
-  });
-}
-
 async function removeAccount(username) {
   if (!confirm(`Remove @${username} and delete its cookies/browser data?`)) return;
   await fetch(`/api/accounts/${username}`, { method: 'DELETE' });
 }
 
+els.accountsTable.addEventListener('change', (e) => {
+  const input = e.target.closest('[data-action="posting"]');
+  if (!input) return;
+  setPostingEnabled(input.dataset.username, input.checked);
+});
+
 els.accountsTable.addEventListener('click', (e) => {
-  const btn = e.target.closest('[data-action]');
+  const btn = e.target.closest('[data-action="remove"]');
   if (!btn) return;
-  const username = btn.dataset.username;
-  if (btn.dataset.action === 'toggle') togglePause(username);
-  if (btn.dataset.action === 'remove') removeAccount(username);
+  removeAccount(btn.dataset.username);
 });
 
 document.querySelectorAll('.tab').forEach((tab) => {

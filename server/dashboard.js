@@ -7,6 +7,7 @@ const {
   syncPostingAccounts,
   removePostingAccountState,
   setPostingAccountPaused,
+  setPostingAccountEnabled,
   addLog,
 } = require('../lib/store');
 const {
@@ -56,7 +57,8 @@ function createDashboardServer(port = 3000) {
       }
 
       const account = addPostingAccount(clean, cookies, { kameleoProfileId });
-      syncPostingAccounts([account.username]);
+      syncPostingAccounts([account]);
+      setPostingAccountEnabled(account.username, false);
       addLog(
         'success',
         `Added posting account @${account.username}${kameleoProfileId ? ` (Kameleo ${kameleoProfileId.slice(0, 8)}…)` : ''}`,
@@ -70,10 +72,27 @@ function createDashboardServer(port = 3000) {
 
   app.patch('/api/accounts/:username', async (req, res) => {
     try {
-      const { paused } = req.body || {};
-      const entry = updatePostingAccountMeta(req.params.username, { paused: Boolean(paused) });
-      setPostingAccountPaused(entry.username, Boolean(paused));
-      addLog('info', `@${entry.username} ${paused ? 'paused' : 'resumed'}`);
+      const { paused, postingEnabled } = req.body || {};
+      const patch = {};
+
+      if (typeof paused === 'boolean') patch.paused = paused;
+      if (typeof postingEnabled === 'boolean') patch.postingEnabled = postingEnabled;
+
+      if (!Object.keys(patch).length) {
+        return res.status(400).json({ error: 'Provide paused or postingEnabled' });
+      }
+
+      const entry = updatePostingAccountMeta(req.params.username, patch);
+
+      if (typeof paused === 'boolean') {
+        setPostingAccountPaused(entry.username, paused);
+        addLog('info', `@${entry.username} ${paused ? 'paused' : 'resumed'}`);
+      }
+      if (typeof postingEnabled === 'boolean') {
+        setPostingAccountEnabled(entry.username, postingEnabled);
+        addLog('info', `@${entry.username} posting ${postingEnabled ? 'enabled' : 'disabled'}`);
+      }
+
       res.json(entry);
     } catch (err) {
       res.status(400).json({ error: err.message });

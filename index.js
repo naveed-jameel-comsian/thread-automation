@@ -494,9 +494,9 @@ function stateNextCheck() {
 }
 
 async function repostToAllAccounts(text, mediaPaths, topic, sourceMeta) {
-  const accounts = listPostingAccounts().filter((a) => !a.paused);
+  const accounts = listPostingAccounts().filter((a) => a.postingEnabled && !a.paused);
   if (!accounts.length) {
-    addLog('warn', 'No active posting accounts — add accounts from the dashboard');
+    addLog('warn', 'No posting-enabled accounts — enable posting from the dashboard');
     return false;
   }
 
@@ -621,7 +621,7 @@ async function checkAccount(page, username, collector) {
 async function monitor() {
   createDashboardServer(DASHBOARD_PORT);
   initSourceAccounts(MONITORED_ACCOUNTS);
-  syncPostingAccounts(listPostingAccounts().map((a) => a.username));
+  syncPostingAccounts(listPostingAccounts());
   setPollInterval(POLL_INTERVAL_MS);
   setMonitorStatus('starting');
 
