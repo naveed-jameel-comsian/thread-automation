@@ -79,14 +79,10 @@
         <button type="button" class="icon-btn" id="closeModalBtn" aria-label="Close">×</button>
       </header>
       <label>
-        <span>Username</span>
+        <span>Username (Kameleo profile name)</span>
         <input type="text" id="accountUsername" placeholder="galinochka_silver2824" required autocomplete="off">
       </label>
-      <label>
-        <span>Cookies (JSON array)</span>
-        <textarea id="accountCookies" rows="10" placeholder='[{"name":"sessionid","value":"...","domain":".threads.com"}]' required></textarea>
-      </label>
-      <p class="hint">Cookies → <code>data/accounts/&lt;username&gt;/cookies.json</code>. Posting is <strong>off</strong> by default — enable it from the dashboard toggle.</p>
+      <p class="hint">Creates a Kameleo profile with this name. Existing profiles in Kameleo (name = username) appear automatically. Posting is <strong>off</strong> until you enable the toggle.</p>
       <footer class="modal-footer">
         <button type="button" class="btn-ghost" id="cancelModalBtn">Cancel</button>
         <button type="submit" class="btn-primary">Add account</button>

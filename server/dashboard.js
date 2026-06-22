@@ -4,26 +4,32 @@ const cors = require('cors');
 const {
   getPublicState,
   onStateChange,
-  syncPostingAccounts,
   removePostingAccountState,
   setPostingAccountPaused,
   setPostingAccountEnabled,
   addLog,
 } = require('../lib/store');
-const {
-  listPostingAccounts,
-  addPostingAccount,
-  removePostingAccount,
-  updatePostingAccountMeta,
-  getPostingAccount,
-  sanitizeUsername,
-} = require('../lib/accounts');
+const { sanitizeUsername } = require('../lib/accounts');
 const {
   invalidateAccountContext,
+  listRepostProfiles,
   createKameleoProfileForAccount,
-  deleteKameleoProfile,
+  deleteKameleoProfileByUsername,
   isKameleoEnabled,
 } = require('../lib/browser');
+
+async function getDashboardAccounts() {
+  const state = getPublicState();
+  const profiles = isKameleoEnabled() ? await listRepostProfiles() : [];
+
+  return profiles.map((profile) => ({
+    ...profile,
+    ...(state.postingAccounts[profile.username] || {}),
+    username: profile.username,
+    kameleoProfileId: profile.id,
+    postingEnabled: state.postingAccounts[profile.username]?.postingEnabled === true,
+  }));
+}
 
 function createDashboardServer(port = 3000) {
   const app = express();
@@ -35,37 +41,29 @@ function createDashboardServer(port = 3000) {
     res.json(getPublicState());
   });
 
-  app.get('/api/accounts', (_req, res) => {
-    const registry = listPostingAccounts();
-    const state = getPublicState();
-    const merged = registry.map((entry) => ({
-      ...entry,
-      ...(state.postingAccounts[entry.username] || {}),
-    }));
-    res.json(merged);
+  app.get('/api/accounts', async (_req, res) => {
+    try {
+      res.json(await getDashboardAccounts());
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   app.post('/api/accounts', async (req, res) => {
-    let kameleoProfileId = null;
     try {
-      const { username, cookies } = req.body || {};
+      const { username } = req.body || {};
       const clean = sanitizeUsername(username);
       if (!clean) throw new Error('Username is required');
 
-      if (isKameleoEnabled()) {
-        kameleoProfileId = await createKameleoProfileForAccount(clean);
+      if (!isKameleoEnabled()) {
+        throw new Error('Kameleo is required — set USE_KAMELEO=true and start Kameleo CLI');
       }
 
-      const account = addPostingAccount(clean, cookies, { kameleoProfileId });
-      syncPostingAccounts([account]);
-      setPostingAccountEnabled(account.username, false);
-      addLog(
-        'success',
-        `Added posting account @${account.username}${kameleoProfileId ? ` (Kameleo ${kameleoProfileId.slice(0, 8)}…)` : ''}`,
-      );
-      res.status(201).json(account);
+      const profileId = await createKameleoProfileForAccount(clean);
+      setPostingAccountEnabled(clean, false);
+      addLog('success', `Created Kameleo profile @${clean} (${profileId.slice(0, 8)}…)`);
+      res.status(201).json({ username: clean, kameleoProfileId: profileId, postingEnabled: false });
     } catch (err) {
-      if (kameleoProfileId) await deleteKameleoProfile(kameleoProfileId).catch(() => {});
       res.status(400).json({ error: err.message });
     }
   });
@@ -73,27 +71,25 @@ function createDashboardServer(port = 3000) {
   app.patch('/api/accounts/:username', async (req, res) => {
     try {
       const { paused, postingEnabled } = req.body || {};
-      const patch = {};
+      const username = sanitizeUsername(req.params.username);
+      if (!username) throw new Error('Username is required');
 
-      if (typeof paused === 'boolean') patch.paused = paused;
-      if (typeof postingEnabled === 'boolean') patch.postingEnabled = postingEnabled;
+      if (typeof paused === 'boolean') {
+        setPostingAccountPaused(username, paused);
+        addLog('info', `@${username} ${paused ? 'paused' : 'resumed'}`);
+      }
+      if (typeof postingEnabled === 'boolean') {
+        setPostingAccountEnabled(username, postingEnabled);
+        addLog('info', `@${username} posting ${postingEnabled ? 'enabled' : 'disabled'}`);
+      }
 
-      if (!Object.keys(patch).length) {
+      if (typeof paused !== 'boolean' && typeof postingEnabled !== 'boolean') {
         return res.status(400).json({ error: 'Provide paused or postingEnabled' });
       }
 
-      const entry = updatePostingAccountMeta(req.params.username, patch);
-
-      if (typeof paused === 'boolean') {
-        setPostingAccountPaused(entry.username, paused);
-        addLog('info', `@${entry.username} ${paused ? 'paused' : 'resumed'}`);
-      }
-      if (typeof postingEnabled === 'boolean') {
-        setPostingAccountEnabled(entry.username, postingEnabled);
-        addLog('info', `@${entry.username} posting ${postingEnabled ? 'enabled' : 'disabled'}`);
-      }
-
-      res.json(entry);
+      const accounts = await getDashboardAccounts();
+      const account = accounts.find((a) => a.username === username);
+      res.json(account || { username, postingEnabled, paused });
     } catch (err) {
       res.status(400).json({ error: err.message });
     }
@@ -101,15 +97,13 @@ function createDashboardServer(port = 3000) {
 
   app.delete('/api/accounts/:username', async (req, res) => {
     try {
-      const username = req.params.username;
-      const account = getPostingAccount(username);
+      const username = sanitizeUsername(req.params.username);
       await invalidateAccountContext(username);
-      if (account?.kameleoProfileId) {
-        await deleteKameleoProfile(account.kameleoProfileId);
+      if (isKameleoEnabled()) {
+        await deleteKameleoProfileByUsername(username);
       }
-      removePostingAccount(username);
       removePostingAccountState(username);
-      addLog('warn', `Removed posting account @${username}`);
+      addLog('warn', `Removed Kameleo profile @${username}`);
       res.json({ ok: true });
     } catch (err) {
       res.status(400).json({ error: err.message });

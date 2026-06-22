@@ -3,7 +3,8 @@ const path = require('path');
 const {
   addLog,
   initSourceAccounts,
-  syncPostingAccounts,
+  syncPostingAccountsFromKameleo,
+  isPostingAllowed,
   setMonitorStatus,
   setPollInterval,
   markCheckStart,
@@ -14,11 +15,10 @@ const {
   recordRepost,
   recordRepostFailure,
 } = require('./lib/store');
-const { listPostingAccounts } = require('./lib/accounts');
 const {
   getScannerContext,
   getAccountContext,
-  ensureKameleoProfilesForAllAccounts,
+  listRepostProfiles,
   isKameleoEnabled,
   checkKameleoHealth,
   SCANNER_PROFILE_ID,
@@ -493,29 +493,37 @@ function stateNextCheck() {
   return new Date(Date.now() + POLL_INTERVAL_MS).toISOString();
 }
 
+async function syncKameleoDashboardAccounts() {
+  const profiles = await listRepostProfiles();
+  syncPostingAccountsFromKameleo(profiles);
+  return profiles;
+}
+
 async function repostToAllAccounts(text, mediaPaths, topic, sourceMeta) {
-  const accounts = listPostingAccounts().filter((a) => a.postingEnabled && !a.paused);
-  if (!accounts.length) {
-    addLog('warn', 'No posting-enabled accounts — enable posting from the dashboard');
+  const profiles = await listRepostProfiles();
+  const targets = profiles.filter((p) => isPostingAllowed(p.username));
+
+  if (!targets.length) {
+    addLog('warn', 'No posting-enabled Kameleo profiles — enable posting from the dashboard');
     return false;
   }
 
   let anySuccess = false;
 
-  for (const account of accounts) {
+  for (const profile of targets) {
     try {
-      const context = await getAccountContext(account.username);
+      const context = await getAccountContext(profile.username);
       const page = await context.newPage();
       try {
         await createThread(page, text, mediaPaths, topic);
         recordRepost({
           ...sourceMeta,
-          targetUsername: account.username,
+          targetUsername: profile.username,
           repostText: text,
           topic: topic || null,
           mediaCount: mediaPaths.length,
         });
-        addLog('success', `Posted to @${account.username} (from @${sourceMeta.sourceUsername})`);
+        addLog('success', `Posted to @${profile.username} (from @${sourceMeta.sourceUsername})`);
         anySuccess = true;
       } finally {
         await page.close().catch(() => {});
@@ -524,11 +532,11 @@ async function repostToAllAccounts(text, mediaPaths, topic, sourceMeta) {
     } catch (err) {
       recordRepostFailure({
         ...sourceMeta,
-        targetUsername: account.username,
+        targetUsername: profile.username,
         repostText: text,
         error: err.message,
       });
-      addLog('error', `Failed posting to @${account.username}: ${err.message}`);
+      addLog('error', `Failed posting to @${profile.username}: ${err.message}`);
     }
   }
 
@@ -621,16 +629,17 @@ async function checkAccount(page, username, collector) {
 async function monitor() {
   createDashboardServer(DASHBOARD_PORT);
   initSourceAccounts(MONITORED_ACCOUNTS);
-  syncPostingAccounts(listPostingAccounts());
   setPollInterval(POLL_INTERVAL_MS);
   setMonitorStatus('starting');
+
+  let repostProfiles = [];
 
   if (isKameleoEnabled()) {
     try {
       await checkKameleoHealth();
-      await ensureKameleoProfilesForAllAccounts(listPostingAccounts);
-      addLog('success', 'Kameleo connected — one profile per posting account');
-      addLog('info', `Scanner uses Kameleo profile ${SCANNER_PROFILE_ID}`);
+      repostProfiles = await syncKameleoDashboardAccounts();
+      addLog('success', `Kameleo: ${repostProfiles.length} repost profile(s) loaded`);
+      addLog('info', `Scanner profile: ${SCANNER_PROFILE_ID}`);
     } catch (err) {
       addLog('warn', `Kameleo unavailable: ${err.message}. Posting needs Kameleo CLI at ${process.env.KAMELEO_API_URL || 'http://localhost:5050'}`);
     }
@@ -640,9 +649,8 @@ async function monitor() {
   const page = await context.newPage();
   const collector = createGraphQLCollector(page);
 
-  const postingAccounts = listPostingAccounts();
   addLog('success', `Monitoring ${MONITORED_ACCOUNTS.map((u) => `@${u}`).join(', ')}`);
-  addLog('info', `${postingAccounts.length} posting account(s) configured`);
+  addLog('info', `${repostProfiles.length} Kameleo repost profile(s)`);
   addLog('info', `Poll interval: ${POLL_INTERVAL_MS / 60000} minutes`);
   setMonitorStatus('idle');
 
@@ -659,16 +667,23 @@ async function monitor() {
       }
     }
 
-    for (const account of listPostingAccounts()) {
-      if (account.paused) continue;
+    if (isKameleoEnabled()) {
       try {
-        await refreshPostingAccountProfile(page, account.username, collector);
+        repostProfiles = await syncKameleoDashboardAccounts();
+        for (const profile of repostProfiles) {
+          if (!isPostingAllowed(profile.username)) continue;
+          try {
+            await refreshPostingAccountProfile(page, profile.username, collector);
+          } catch (err) {
+            updatePostingAccount(profile.username, {
+              status: 'stalled',
+              lastError: err.message,
+            });
+            addLog('warn', `Could not refresh @${profile.username}: ${err.message}`);
+          }
+        }
       } catch (err) {
-        updatePostingAccount(account.username, {
-          status: 'stalled',
-          lastError: err.message,
-        });
-        addLog('warn', `Could not refresh @${account.username}: ${err.message}`);
+        addLog('warn', `Could not sync Kameleo profiles: ${err.message}`);
       }
     }
 

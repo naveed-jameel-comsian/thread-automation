@@ -1,4 +1,5 @@
 let state = null;
+let accounts = [];
 let filter = 'all';
 let search = '';
 
@@ -59,7 +60,17 @@ function reachClass(reach) {
 }
 
 function getPostingAccounts() {
+  if (accounts.length) return accounts;
   return Object.values(state?.postingAccounts || {});
+}
+
+async function loadAccounts() {
+  try {
+    const res = await fetch('/api/accounts');
+    if (res.ok) accounts = await res.json();
+  } catch {
+    // Keep last known list on error.
+  }
 }
 
 function filterAccounts(accounts) {
@@ -268,20 +279,11 @@ els.cancelModalBtn.addEventListener('click', closeModal);
 els.addAccountForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const username = document.getElementById('accountUsername').value.trim();
-  const cookiesRaw = document.getElementById('accountCookies').value.trim();
-
-  let cookies;
-  try {
-    cookies = JSON.parse(cookiesRaw);
-  } catch {
-    alert('Cookies must be valid JSON array');
-    return;
-  }
 
   const res = await fetch('/api/accounts', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, cookies }),
+    body: JSON.stringify({ username }),
   });
 
   const data = await res.json();
@@ -295,9 +297,10 @@ els.addAccountForm.addEventListener('submit', async (e) => {
 
 function connect() {
   const source = new EventSource('/api/events');
-  source.onmessage = (event) => {
+  source.onmessage = async (event) => {
     try {
       state = JSON.parse(event.data);
+      await loadAccounts();
       render();
     } catch (err) {
       console.error(err);
@@ -307,6 +310,8 @@ function connect() {
     source.close();
     setTimeout(connect, 3000);
   };
+
+  loadAccounts().then(render);
 }
 
 connect();
