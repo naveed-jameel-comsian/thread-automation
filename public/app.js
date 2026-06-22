@@ -13,7 +13,7 @@ const els = {
   lastRepost: document.getElementById('lastRepost'),
   activityLog: document.getElementById('activityLog'),
   searchInput: document.getElementById('searchInput'),
-  addAccountBtn: document.getElementById('addAccountBtn'),
+  // addAccountBtn: document.getElementById('addAccountBtn'),
   addAccountModal: document.getElementById('addAccountModal'),
   addAccountForm: document.getElementById('addAccountForm'),
   closeModalBtn: document.getElementById('closeModalBtn'),
@@ -272,7 +272,7 @@ function closeModal() {
   els.addAccountForm.reset();
 }
 
-els.addAccountBtn.addEventListener('click', openModal);
+// els.addAccountBtn.addEventListener('click', openModal);
 els.closeModalBtn.addEventListener('click', closeModal);
 els.cancelModalBtn.addEventListener('click', closeModal);
 
