@@ -1,4 +1,5 @@
 const path = require('path');
+const http = require('http');
 const express = require('express');
 const cors = require('cors');
 const {
@@ -7,28 +8,37 @@ const {
   removePostingAccountState,
   setPostingAccountPaused,
   setPostingAccountEnabled,
+  patchPostingAccountSettings,
   addLog,
 } = require('../lib/store');
 const { sanitizeUsername } = require('../lib/accounts');
 const {
   invalidateAccountContext,
   listRepostProfiles,
-  createKameleoProfileForAccount,
+  ensureKameleoProfileForAccount,
   deleteKameleoProfileByUsername,
   isKameleoEnabled,
 } = require('../lib/browser');
+const { registerRemoteLogin } = require('./remote-login');
 
 async function getDashboardAccounts() {
   const state = getPublicState();
-  const profiles = isKameleoEnabled() ? await listRepostProfiles() : [];
 
-  return profiles.map((profile) => ({
-    ...profile,
-    ...(state.postingAccounts[profile.username] || {}),
-    username: profile.username,
-    kameleoProfileId: profile.id,
-    postingEnabled: state.postingAccounts[profile.username]?.postingEnabled === true,
-  }));
+  try {
+    const profiles = isKameleoEnabled() ? await listRepostProfiles() : [];
+    return profiles.map((profile) => ({
+      ...profile,
+      ...(state.postingAccounts[profile.username] || {}),
+      username: profile.username,
+      kameleoProfileId: profile.id,
+      postingEnabled: state.postingAccounts[profile.username]?.postingEnabled === true,
+    }));
+  } catch {
+    return Object.values(state.postingAccounts || {}).map((account) => ({
+      ...account,
+      postingEnabled: account.postingEnabled === true,
+    }));
+  }
 }
 
 function createDashboardServer(port = 3000) {
@@ -59,9 +69,14 @@ function createDashboardServer(port = 3000) {
         throw new Error('Kameleo is required — set USE_KAMELEO=true and start Kameleo CLI');
       }
 
-      const profileId = await createKameleoProfileForAccount(clean);
+      const profileId = await ensureKameleoProfileForAccount(clean);
+      patchPostingAccountSettings(clean, {
+        kameleoProfileId: profileId,
+        displayName: clean,
+        status: 'pending',
+      });
       setPostingAccountEnabled(clean, false);
-      addLog('success', `Created Kameleo profile @${clean} (${profileId.slice(0, 8)}…)`);
+      addLog('success', `Created Kameleo profile @${clean} (${profileId.slice(0, 8)}…) — open remote login to sign in`);
       res.status(201).json({ username: clean, kameleoProfileId: profileId, postingEnabled: false });
     } catch (err) {
       res.status(400).json({ error: err.message });
@@ -112,8 +127,9 @@ function createDashboardServer(port = 3000) {
 
   app.get('/api/events', (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
 
     const send = (data) => {
@@ -123,16 +139,24 @@ function createDashboardServer(port = 3000) {
     send(getPublicState());
     const unsubscribe = onStateChange(send);
 
+    const heartbeat = setInterval(() => {
+      res.write(': heartbeat\n\n');
+    }, 25000);
+
     req.on('close', () => {
+      clearInterval(heartbeat);
       unsubscribe();
     });
   });
 
-  app.listen(port, () => {
+  const server = http.createServer(app);
+  registerRemoteLogin(server);
+
+  server.listen(port, () => {
     console.log(`Dashboard: http://localhost:${port}`);
   });
 
-  return app;
+  return { app, server };
 }
 
 module.exports = { createDashboardServer };

@@ -439,6 +439,87 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   padding: 16px 18px 18px;
 }
 
+.modal-wide {
+  width: min(920px, 96vw);
+}
+
+.remote-login-body {
+  padding: 0 18px 18px;
+}
+
+.remote-login-notice {
+  margin: 12px 0;
+  padding: 12px 14px;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  border-radius: 10px;
+  font-size: 0.85rem;
+  color: #bfdbfe;
+}
+
+.remote-login-notice p { margin: 0; }
+
+.remote-viewport {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #000;
+  min-height: 400px;
+  max-height: 70vh;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  outline: none;
+}
+
+.remote-viewport img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  cursor: crosshair;
+  user-select: none;
+}
+
+.remote-loading {
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.remote-spinner {
+  width: 28px;
+  height: 28px;
+  margin: 0 auto 12px;
+  border: 2px solid #3b82f6;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.remote-login-footer {
+  margin-top: 12px;
+}
+
+.remote-tip { padding: 0; margin: 0 0 10px; }
+
+.remote-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.remote-status {
+  font-size: 0.82rem;
+  color: var(--green);
+}
+
+.remote-status.error { color: var(--red); }
+
 @media (max-width: 1100px) {
   .kpi-row { grid-template-columns: repeat(3, 1fr); }
   .bottom-grid { grid-template-columns: 1fr; }

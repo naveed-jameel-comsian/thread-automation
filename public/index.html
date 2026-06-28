@@ -29,7 +29,7 @@
       </div>
       <div class="toolbar-right">
         <input type="search" id="searchInput" class="search" placeholder="Search accounts...">
-        <!-- <button class="btn-primary" id="addAccountBtn">+ Add account</button> -->
+        <button class="btn-primary" id="addAccountBtn">+ Add account</button>
       </div>
     </section>
 
@@ -82,7 +82,7 @@
         <span>Username (Kameleo profile name)</span>
         <input type="text" id="accountUsername" placeholder="galinochka_silver2824" required autocomplete="off">
       </label>
-      <p class="hint">Creates a Kameleo profile with this name. Existing profiles in Kameleo (name = username) appear automatically. Posting is <strong>off</strong> until you enable the toggle.</p>
+      <p class="hint">Creates a Kameleo profile with this name, then opens a remote login window so you can sign in to Threads (including 2FA). Posting stays <strong>off</strong> until you enable the toggle.</p>
       <footer class="modal-footer">
         <button type="button" class="btn-ghost" id="cancelModalBtn">Cancel</button>
         <button type="submit" class="btn-primary">Add account</button>
@@ -90,6 +90,33 @@
     </form>
   </dialog>
 
+  <dialog id="remoteLoginModal" class="modal modal-wide">
+    <header class="modal-header">
+      <h3 id="remoteLoginTitle">Remote login</h3>
+      <button type="button" class="icon-btn" id="closeRemoteLoginBtn" aria-label="Close">×</button>
+    </header>
+    <div class="remote-login-body">
+      <div class="remote-login-notice">
+        <p><strong>Sign in to Threads remotely.</strong> Use your mouse and keyboard in the window below to complete login or 2FA. Your session is saved to the Kameleo profile when you finish.</p>
+      </div>
+      <div class="remote-viewport" id="remoteViewport" tabindex="0">
+        <img id="remoteFrame" alt="Threads remote session" hidden>
+        <div class="remote-loading" id="remoteLoading">
+          <div class="remote-spinner"></div>
+          <p id="remoteLoadingText">Starting remote session...</p>
+        </div>
+      </div>
+      <div class="remote-login-footer">
+        <p class="hint remote-tip">Click the image once, then type as usual (Tab, Enter, etc.).</p>
+        <div class="remote-actions">
+          <button type="button" class="btn-ghost" id="saveSessionBtn">Save session now</button>
+          <span class="remote-status" id="remoteStatus"></span>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="/socket.io/socket.io.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

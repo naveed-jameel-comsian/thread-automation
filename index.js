@@ -420,13 +420,32 @@ function formatRepostText(post) {
   return attribution ? `${text}\n\n${attribution}` : text;
 }
 
+async function clickCreateThreadButton(page) {
+  const selectors = [
+    () => page.getByRole('button', { name: 'Create' }),
+    () => page.getByRole('button', { name: 'New thread' }),
+    () => page.locator('[role="button"]:has(svg[aria-label="Create"])'),
+  ];
+
+  for (const getLocator of selectors) {
+    const btn = getLocator().first();
+    try {
+      await btn.waitFor({ state: 'visible', timeout: 5000 });
+      await btn.click();
+      return;
+    } catch {
+      // Try next selector.
+    }
+  }
+
+  throw new Error('Could not find create thread button');
+}
+
 async function openNewThreadComposer(page) {
   await page.goto('https://www.threads.com', { waitUntil: 'domcontentloaded', timeout: 60000 });
   await delay(3000);
 
-  const newThreadBtn = page.getByRole('button', { name: 'New thread' });
-  await newThreadBtn.waitFor({ state: 'visible', timeout: 20000 });
-  await newThreadBtn.click();
+  await clickCreateThreadButton(page);
 
   const composer = page.getByRole('textbox', { name: /Type to compose a new post/i });
   await composer.waitFor({ state: 'visible', timeout: 20000 });
@@ -541,7 +560,7 @@ async function repostToAllAccounts(text, mediaPaths, topic, sourceMeta) {
         } finally {
           await page.close().catch(() => {});
         }
-      });
+      }, profile.id);
       await delay(4000);
     } catch (err) {
       recordRepostFailure({
@@ -732,16 +751,36 @@ async function runAutomationLoop() {
     if (isKameleoEnabled()) {
       try {
         repostProfiles = await syncKameleoDashboardAccounts();
-        for (const profile of repostProfiles) {
-          if (!isPostingAllowed(profile.username)) continue;
+        const refreshTargets = repostProfiles.filter((p) => isPostingAllowed(p.username));
+
+        if (refreshTargets.length) {
+          await page.close().catch(() => {});
+          collector.detach?.();
+
           try {
-            await refreshPostingAccountProfile(page, profile.username, collector);
-          } catch (err) {
-            updatePostingAccount(profile.username, {
-              status: 'stalled',
-              lastError: err.message,
-            });
-            addLog('warn', `Could not refresh @${profile.username}: ${err.message}`);
+            for (const profile of refreshTargets) {
+              try {
+                await withRepostProfile(profile.username, async (context) => {
+                  const accountPage = await context.newPage();
+                  try {
+                    const accountCollector = createGraphQLCollector(accountPage);
+                    await refreshPostingAccountProfile(accountPage, profile.username, accountCollector);
+                  } finally {
+                    await accountPage.close().catch(() => {});
+                  }
+                }, profile.id);
+              } catch (err) {
+                updatePostingAccount(profile.username, {
+                  status: 'stalled',
+                  lastError: err.message,
+                });
+                addLog('warn', `Could not refresh @${profile.username}: ${err.message}`);
+              }
+            }
+          } finally {
+            const scannerContext = await reopenScannerSession();
+            page = await scannerContext.newPage();
+            collector = createGraphQLCollector(page);
           }
         }
       } catch (err) {

@@ -3,6 +3,9 @@ let accounts = [];
 let filter = 'all';
 let search = '';
 
+const VIEWPORT_WIDTH = 1280;
+const VIEWPORT_HEIGHT = 900;
+
 const els = {
   subtitle: document.getElementById('subtitle'),
   monitorBadge: document.getElementById('monitorBadge'),
@@ -13,7 +16,7 @@ const els = {
   lastRepost: document.getElementById('lastRepost'),
   activityLog: document.getElementById('activityLog'),
   searchInput: document.getElementById('searchInput'),
-  // addAccountBtn: document.getElementById('addAccountBtn'),
+  addAccountBtn: document.getElementById('addAccountBtn'),
   addAccountModal: document.getElementById('addAccountModal'),
   addAccountForm: document.getElementById('addAccountForm'),
   closeModalBtn: document.getElementById('closeModalBtn'),
@@ -21,6 +24,24 @@ const els = {
   tabAll: document.getElementById('tabAll'),
   tabAttention: document.getElementById('tabAttention'),
   tabLive: document.getElementById('tabLive'),
+  remoteLoginModal: document.getElementById('remoteLoginModal'),
+  remoteLoginTitle: document.getElementById('remoteLoginTitle'),
+  closeRemoteLoginBtn: document.getElementById('closeRemoteLoginBtn'),
+  remoteViewport: document.getElementById('remoteViewport'),
+  remoteFrame: document.getElementById('remoteFrame'),
+  remoteLoading: document.getElementById('remoteLoading'),
+  remoteLoadingText: document.getElementById('remoteLoadingText'),
+  saveSessionBtn: document.getElementById('saveSessionBtn'),
+  remoteStatus: document.getElementById('remoteStatus'),
+};
+
+const remoteLogin = {
+  username: null,
+  profileId: null,
+  socket: null,
+  lastFrame: null,
+  loggedIn: false,
+  closing: false,
 };
 
 function formatTime(value) {
@@ -71,6 +92,20 @@ async function loadAccounts() {
   } catch {
     // Keep last known list on error.
   }
+}
+
+async function loadState() {
+  try {
+    const res = await fetch('/api/status');
+    if (res.ok) state = await res.json();
+  } catch {
+    // Keep last known state on error.
+  }
+}
+
+async function refreshDashboard() {
+  await Promise.all([loadState(), loadAccounts()]);
+  render();
 }
 
 function filterAccounts(accounts) {
@@ -153,6 +188,7 @@ function renderAccountsTable() {
         </td>
         <td>
           <div class="row-actions">
+            <button class="icon-btn" title="Remote login" data-action="login" data-username="${a.username}" data-profile-id="${a.kameleoProfileId || ''}">🔑</button>
             <button class="icon-btn" title="Remove" data-action="remove" data-username="${a.username}">🗑</button>
           </div>
         </td>
@@ -210,16 +246,18 @@ function renderActivity() {
 }
 
 function render() {
-  if (!state) return;
+  const summary = state?.summary || {};
+  const automationEnabled = state?.automationEnabled ?? false;
+  const monitoredCount = state?.monitoredAccounts?.length || 0;
+  const monitorStatus = state?.monitorStatus || 'connecting';
 
-  const summary = state.summary || {};
   const total = getPostingAccounts().length;
   const attention = getPostingAccounts().filter((a) => ['stalled', 'blocked', 'error', 'shadowban'].includes(a.status)).length;
   const live = getPostingAccounts().filter((a) => a.postingEnabled && a.status === 'smooth' && !a.paused).length;
 
-  els.subtitle.textContent = `${total} accounts · ${state.automationEnabled ? 'automation on' : 'automation off'} · monitoring ${state.monitoredAccounts?.length || 0} sources`;
-  els.monitorStatus.textContent = state.monitorStatus || 'unknown';
-  els.monitorBadge.className = `monitor-badge ${state.monitorStatus || 'starting'}`;
+  els.subtitle.textContent = `${total} accounts · ${automationEnabled ? 'automation on' : 'automation off'} · monitoring ${monitoredCount} sources`;
+  els.monitorStatus.textContent = monitorStatus;
+  els.monitorBadge.className = `monitor-badge ${monitorStatus}`;
 
   els.tabAll.textContent = total;
   els.tabAttention.textContent = attention;
@@ -237,6 +275,25 @@ async function removeAccount(username) {
   await fetch(`/api/accounts/${username}`, { method: 'DELETE' });
 }
 
+async function setPostingEnabled(username, enabled) {
+  try {
+    const res = await fetch(`/api/accounts/${encodeURIComponent(username)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ postingEnabled: enabled }),
+    });
+
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to update posting setting');
+
+    const idx = accounts.findIndex((a) => a.username === username);
+    if (idx !== -1) accounts[idx] = { ...accounts[idx], ...data };
+  } catch (err) {
+    alert(err.message || 'Failed to update posting setting');
+    renderAccountsTable();
+  }
+}
+
 els.accountsTable.addEventListener('change', (e) => {
   const input = e.target.closest('[data-action="posting"]');
   if (!input) return;
@@ -244,6 +301,12 @@ els.accountsTable.addEventListener('change', (e) => {
 });
 
 els.accountsTable.addEventListener('click', (e) => {
+  const loginBtn = e.target.closest('[data-action="login"]');
+  if (loginBtn) {
+    openRemoteLogin(loginBtn.dataset.username, loginBtn.dataset.profileId);
+    return;
+  }
+
   const btn = e.target.closest('[data-action="remove"]');
   if (!btn) return;
   removeAccount(btn.dataset.username);
@@ -272,30 +335,213 @@ function closeModal() {
   els.addAccountForm.reset();
 }
 
-// els.addAccountBtn.addEventListener('click', openModal);
+function resetRemoteLoginUi() {
+  remoteLogin.lastFrame = null;
+  remoteLogin.loggedIn = false;
+  remoteLogin.closing = false;
+  els.remoteFrame.hidden = true;
+  els.remoteFrame.removeAttribute('src');
+  els.remoteLoading.hidden = false;
+  els.remoteLoadingText.textContent = 'Starting remote session...';
+  els.remoteStatus.textContent = '';
+  els.remoteStatus.className = 'remote-status';
+  els.saveSessionBtn.disabled = false;
+}
+
+function disconnectRemoteLogin() {
+  if (remoteLogin.socket) {
+    remoteLogin.socket.disconnect();
+    remoteLogin.socket = null;
+  }
+}
+
+function closeRemoteLogin() {
+  if (remoteLogin.closing) return;
+
+  const finishClose = () => {
+    disconnectRemoteLogin();
+    resetRemoteLoginUi();
+    remoteLogin.username = null;
+    remoteLogin.profileId = null;
+    els.remoteLoginModal.close();
+    refreshDashboard();
+  };
+
+  const socket = remoteLogin.socket;
+  if (socket && socket.connected) {
+    remoteLogin.closing = true;
+    els.remoteStatus.textContent = 'Saving session...';
+    socket.emit('closeSession');
+    socket.once('sessionClosed', finishClose);
+    setTimeout(finishClose, 3000);
+    return;
+  }
+
+  finishClose();
+}
+
+function sendRemoteMouse(type, domEvent) {
+  const socket = remoteLogin.socket;
+  const img = els.remoteFrame;
+  if (!socket || !img || img.hidden) return;
+
+  const rect = img.getBoundingClientRect();
+  const relX = domEvent.clientX - rect.left;
+  const relY = domEvent.clientY - rect.top;
+  const scaleX = VIEWPORT_WIDTH / rect.width;
+  const scaleY = VIEWPORT_HEIGHT / rect.height;
+
+  socket.emit('mouse', {
+    type,
+    x: Math.round(relX * scaleX),
+    y: Math.round(relY * scaleY),
+    button: domEvent.button === 2 ? 'right' : 'left',
+  });
+}
+
+function startRemoteLoginSession() {
+  disconnectRemoteLogin();
+  resetRemoteLoginUi();
+
+  if (!remoteLogin.username || !remoteLogin.profileId) {
+    els.remoteStatus.textContent = 'Missing profile information';
+    els.remoteStatus.className = 'remote-status error';
+    return;
+  }
+
+  if (typeof io === 'undefined') {
+    els.remoteStatus.textContent = 'Socket.IO failed to load';
+    els.remoteStatus.className = 'remote-status error';
+    return;
+  }
+
+  const socket = io('/threads-remote', {
+    query: {
+      username: remoteLogin.username,
+      profileId: remoteLogin.profileId,
+    },
+  });
+
+  remoteLogin.socket = socket;
+
+  socket.on('connect', () => {
+    socket.emit('startRemoteLogin');
+  });
+
+  socket.on('loading', (data) => {
+    els.remoteLoading.hidden = false;
+    els.remoteLoadingText.textContent = data?.message || 'Loading...';
+  });
+
+  socket.on('ready', () => {
+    els.remoteLoadingText.textContent = 'Waiting for first frame...';
+  });
+
+  socket.on('screencast', ({ frame }) => {
+    const src = `data:image/jpeg;base64,${frame}`;
+    if (src === remoteLogin.lastFrame) return;
+    remoteLogin.lastFrame = src;
+    els.remoteFrame.src = src;
+    els.remoteFrame.hidden = false;
+    els.remoteLoading.hidden = true;
+  });
+
+  socket.on('loginSuccess', () => {
+    remoteLogin.loggedIn = true;
+    els.remoteStatus.textContent = 'Logged in — session saved. You can close this window.';
+  });
+
+  socket.on('sessionSaved', () => {
+    remoteLogin.loggedIn = true;
+    els.remoteStatus.textContent = 'Session saved.';
+    els.saveSessionBtn.disabled = false;
+  });
+
+  socket.on('error', (payload) => {
+    els.remoteStatus.textContent = payload?.message || 'Remote login error';
+    els.remoteStatus.className = 'remote-status error';
+    els.remoteLoading.hidden = false;
+    els.saveSessionBtn.disabled = false;
+  });
+
+  socket.on('connect_error', () => {
+    els.remoteStatus.textContent = 'Could not connect to remote login';
+    els.remoteStatus.className = 'remote-status error';
+  });
+}
+
+function openRemoteLogin(username, profileId) {
+  if (!profileId) {
+    const account = getPostingAccounts().find((a) => a.username === username);
+    profileId = account?.kameleoProfileId;
+  }
+  if (!profileId) {
+    alert('No Kameleo profile found for this account.');
+    return;
+  }
+
+  remoteLogin.username = username;
+  remoteLogin.profileId = profileId;
+  els.remoteLoginTitle.textContent = `Remote login for @${username}`;
+  els.remoteLoginModal.showModal();
+  startRemoteLoginSession();
+}
+
+els.addAccountBtn.addEventListener('click', openModal);
 els.closeModalBtn.addEventListener('click', closeModal);
 els.cancelModalBtn.addEventListener('click', closeModal);
+els.closeRemoteLoginBtn.addEventListener('click', closeRemoteLogin);
+
+els.remoteLoginModal.addEventListener('close', () => {
+  if (!remoteLogin.closing) disconnectRemoteLogin();
+});
+
+els.remoteFrame.addEventListener('click', (e) => sendRemoteMouse('click', e));
+els.remoteFrame.addEventListener('mousemove', (e) => sendRemoteMouse('move', e));
+
+els.remoteViewport.addEventListener('keydown', (e) => {
+  const socket = remoteLogin.socket;
+  if (!socket) return;
+  e.preventDefault();
+  if (e.key.length === 1) socket.emit('keyboard', { text: e.key });
+  else socket.emit('keyboard', { key: e.key });
+});
+
+els.saveSessionBtn.addEventListener('click', () => {
+  const socket = remoteLogin.socket;
+  if (!socket) return;
+  els.saveSessionBtn.disabled = true;
+  socket.emit('saveSession');
+});
 
 els.addAccountForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const username = document.getElementById('accountUsername').value.trim();
+  const submitBtn = els.addAccountForm.querySelector('[type="submit"]');
+  if (submitBtn) submitBtn.disabled = true;
 
-  const res = await fetch('/api/accounts', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username }),
-  });
+  try {
+    const res = await fetch('/api/accounts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username }),
+    });
 
-  const data = await res.json();
-  if (!res.ok) {
-    alert(data.error || 'Failed to add account');
-    return;
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to add account');
+
+    closeModal();
+    openRemoteLogin(data.username, data.kameleoProfileId);
+  } catch (err) {
+    alert(err.message || 'Failed to add account');
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
   }
-
-  closeModal();
 });
 
 function connect() {
+  refreshDashboard();
+
   const source = new EventSource('/api/events');
   source.onmessage = async (event) => {
     try {
@@ -308,10 +554,9 @@ function connect() {
   };
   source.onerror = () => {
     source.close();
+    refreshDashboard();
     setTimeout(connect, 3000);
   };
-
-  loadAccounts().then(render);
 }
 
 connect();
