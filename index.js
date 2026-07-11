@@ -23,6 +23,8 @@ const {
   closeScannerSession,
   reopenScannerSession,
   withRepostProfile,
+  openRepostProfileSession,
+  closeRepostProfileSession,
   listRepostProfiles,
   isKameleoEnabled,
   checkKameleoHealth,
@@ -31,6 +33,11 @@ const {
 const { createDashboardServer } = require('./server/dashboard');
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function randomDelay(minMs, maxMs) {
+  const ms = minMs + Math.floor(Math.random() * (maxMs - minMs + 1));
+  return delay(ms);
+}
 
 const ROOT = path.join(__dirname, '.');
 const SEEN_POSTS_FILE = path.join(ROOT, 'seen-posts.json');
@@ -363,9 +370,42 @@ async function downloadMedia(urls) {
   return saved;
 }
 
-const NO_ATTRIBUTION_ACCOUNTS = ['jinnie.3007'];
+const NO_ATTRIBUTION_ACCOUNTS = ['kraven.0309', 'jinnie.3007'];
+const STRIP_FROM_REPOST_TEXT = ['kraven.0309', 'jinnie.3007'];
 const RELATIVE_TIME_RE = /^(?:\d+[smhdw]|\d+\s*(?:sec|secs|second|seconds|min|mins|minute|minutes|hour|hours|hr|hrs|day|days|week|weeks|month|months|year|years)(?:\s+ago)?)$/i;
 const NOISE_LINE_RE = /^(?:\d+\/\d+|\d+|\/|like|reply|repost|share|follow|more)$/i;
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function stripUsernamesFromText(text, usernames = STRIP_FROM_REPOST_TEXT) {
+  if (!text) return '';
+
+  let lines = text.split('\n');
+
+  for (const username of usernames) {
+    const pattern = escapeRegex(username);
+    lines = lines.filter((line) => {
+      const trimmed = line.trim();
+      return !new RegExp(`^@?${pattern}$`, 'i').test(trimmed)
+        && !new RegExp(`^via\\s*@?${pattern}$`, 'i').test(trimmed);
+    });
+  }
+
+  lines = lines
+    .map((line) => {
+      let result = line;
+      for (const username of usernames) {
+        const pattern = escapeRegex(username);
+        result = result.replace(new RegExp(`@?${pattern}`, 'gi'), '');
+      }
+      return result.trim();
+    })
+    .filter(Boolean);
+
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
 
 function cleanRepostText(text, username, topic) {
   let lines = text.split('\n').map((line) => line.trim()).filter(Boolean);
@@ -388,14 +428,6 @@ function cleanRepostText(text, username, topic) {
     }
   }
 
-  if (username === 'jinnie.3007') {
-    lines = lines
-      .filter((line) => !/^\s*via\s*@?jinnie\.3007\s*$/i.test(line))
-      .filter((line) => !/^\s*via\s*$/i.test(line))
-      .map((line) => line.replace(/@jinnie\.3007/gi, '').replace(/jinnie\.3007/gi, '').trim())
-      .filter(Boolean);
-  }
-
   while (lines.length) {
     const last = lines[lines.length - 1];
     if (NOISE_LINE_RE.test(last)) {
@@ -412,25 +444,29 @@ function formatRepostText(post) {
   const text = cleanRepostText(post.text?.trim() || '', post.username, post.topic);
   if (!text) return '';
 
-  if (NO_ATTRIBUTION_ACCOUNTS.includes(post.username)) {
-    return text;
+  let result = text;
+  if (!NO_ATTRIBUTION_ACCOUNTS.includes(post.username)) {
+    const attribution = post.username ? `via @${post.username}` : '';
+    result = attribution ? `${text}\n\n${attribution}` : text;
   }
 
-  const attribution = post.username ? `via @${post.username}` : '';
-  return attribution ? `${text}\n\n${attribution}` : text;
+  return stripUsernamesFromText(result);
 }
 
 async function clickCreateThreadButton(page) {
   const selectors = [
-    () => page.getByRole('button', { name: 'Create' }),
-    () => page.getByRole('button', { name: 'New thread' }),
+    () => page.getByRole('button', { name: /new thread/i }),
+    () => page.locator('[role="button"]:has-text("New thread")'),
+    () => page.locator('[role="button"]').filter({ has: page.locator('span:has-text("New thread")') }),
+    () => page.getByRole('button', { name: /create/i }),
     () => page.locator('[role="button"]:has(svg[aria-label="Create"])'),
+    () => page.locator('[role="button"]:has(path[d*="M12 2C12.5523"])'),
   ];
 
   for (const getLocator of selectors) {
     const btn = getLocator().first();
     try {
-      await btn.waitFor({ state: 'visible', timeout: 5000 });
+      await btn.waitFor({ state: 'visible', timeout: 8000 });
       await btn.click();
       return;
     } catch {
@@ -441,9 +477,13 @@ async function clickCreateThreadButton(page) {
   throw new Error('Could not find create thread button');
 }
 
-async function openNewThreadComposer(page) {
-  await page.goto('https://www.threads.com', { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await delay(3000);
+async function openNewThreadComposer(page, { initialNavigation = true } = {}) {
+  if (initialNavigation) {
+    await page.goto('https://www.threads.com', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await delay(3000);
+  } else {
+    await delay(2000);
+  }
 
   await clickCreateThreadButton(page);
 
@@ -476,8 +516,8 @@ async function setCommunityTopic(page, topic) {
   await delay(500);
 }
 
-async function createThread(page, text, mediaPaths = [], topic = null) {
-  const composer = await openNewThreadComposer(page);
+async function createThread(page, text, mediaPaths = [], topic = null, { initialNavigation = true } = {}) {
+  const composer = await openNewThreadComposer(page, { initialNavigation });
   await setCommunityTopic(page, topic);
   await composer.click();
 
@@ -531,49 +571,92 @@ async function syncKameleoDashboardAccounts() {
   return profiles;
 }
 
-async function repostToAllAccounts(text, mediaPaths, topic, sourceMeta) {
-  const profiles = await listRepostProfiles();
-  const targets = profiles.filter((p) => isPostingAllowed(p.username));
+async function processPendingReposts(pendingReposts) {
+  if (!pendingReposts.length) return;
 
-  if (!targets.length) {
+  addLog('info', `Scan complete — reposting ${pendingReposts.length} post(s) via Kameleo client profiles`);
+  await closeScannerSession();
+
+  const profiles = (await listRepostProfiles()).filter((p) => isPostingAllowed(p.username));
+  if (!profiles.length) {
     addLog('warn', 'No posting-enabled Kameleo profiles — enable posting from the dashboard');
-    return false;
+    await reopenScannerSession();
+    return;
   }
 
-  let anySuccess = false;
+  const jobSucceeded = pendingReposts.map(() => false);
 
-  for (const profile of targets) {
-    try {
-      await withRepostProfile(profile.username, async (context) => {
-        const page = await context.newPage();
-        try {
-          await createThread(page, text, mediaPaths, topic);
-          recordRepost({
-            ...sourceMeta,
-            targetUsername: profile.username,
-            repostText: text,
-            topic: topic || null,
-            mediaCount: mediaPaths.length,
-          });
-          addLog('success', `Posted to @${profile.username} via Kameleo profile ${profile.id.slice(0, 8)}…`);
-          anySuccess = true;
-        } finally {
-          await page.close().catch(() => {});
+  try {
+    for (const profile of profiles) {
+      let page = null;
+
+      try {
+        const context = await openRepostProfileSession(profile.username, profile.id);
+        page = await context.newPage();
+
+        for (let i = 0; i < pendingReposts.length; i++) {
+          const job = pendingReposts[i];
+
+          try {
+            await createThread(page, job.repostText, job.mediaPaths, job.topic, {
+              initialNavigation: i === 0,
+            });
+            recordRepost({
+              sourceUsername: job.sourceUsername,
+              sourcePostId: job.sourcePostId,
+              sourcePostUrl: job.sourcePostUrl,
+              sourcePostAt: job.sourcePostAt,
+              targetUsername: profile.username,
+              repostText: job.repostText,
+              topic: job.topic || null,
+              mediaCount: job.mediaPaths.length,
+            });
+            addLog('success', `Posted to @${profile.username} via Kameleo profile ${profile.id.slice(0, 8)}…`);
+            jobSucceeded[i] = true;
+          } catch (err) {
+            recordRepostFailure({
+              sourceUsername: job.sourceUsername,
+              sourcePostId: job.sourcePostId,
+              sourcePostUrl: job.sourcePostUrl,
+              sourcePostAt: job.sourcePostAt,
+              targetUsername: profile.username,
+              repostText: job.repostText,
+              error: err.message,
+            });
+            addLog('error', `Failed posting to @${profile.username}: ${err.message}`);
+          }
+
+          if (i < pendingReposts.length - 1) {
+            await randomDelay(5000, 10000);
+          }
         }
-      }, profile.id);
-      await delay(4000);
-    } catch (err) {
-      recordRepostFailure({
-        ...sourceMeta,
-        targetUsername: profile.username,
-        repostText: text,
-        error: err.message,
-      });
-      addLog('error', `Failed posting to @${profile.username}: ${err.message}`);
+      } catch (err) {
+        addLog('error', `Could not open @${profile.username} for reposting: ${err.message}`);
+      } finally {
+        if (page) await page.close().catch(() => {});
+        await closeRepostProfileSession(profile.username);
+      }
     }
-  }
 
-  return anySuccess;
+    for (let i = 0; i < pendingReposts.length; i++) {
+      const job = pendingReposts[i];
+      if (!jobSucceeded[i]) continue;
+
+      job.accountSeen.add(job.sourcePostId);
+      job.seenPosts[job.sourceUsername] = [...job.accountSeen];
+      saveSeenPosts(job.seenPosts);
+      updateSourceAccountCheck(job.sourceUsername, {
+        totalSeenPosts: job.accountSeen.size,
+      });
+
+      for (const filePath of job.mediaPaths) {
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      }
+    }
+  } finally {
+    await reopenScannerSession();
+    addLog('info', 'Scanner profile reopened');
+  }
 }
 
 async function checkAccount(page, username, collector) {
@@ -652,51 +735,6 @@ async function checkAccount(page, username, collector) {
   }
 
   return pendingReposts;
-}
-
-async function processPendingReposts(pendingReposts) {
-  if (!pendingReposts.length) return;
-
-  addLog('info', `Scan complete — reposting ${pendingReposts.length} post(s) via Kameleo client profiles`);
-  await closeScannerSession();
-
-  try {
-    for (const job of pendingReposts) {
-      try {
-        const posted = await repostToAllAccounts(
-          job.repostText,
-          job.mediaPaths,
-          job.topic,
-          {
-            sourceUsername: job.sourceUsername,
-            sourcePostId: job.sourcePostId,
-            sourcePostUrl: job.sourcePostUrl,
-            sourcePostAt: job.sourcePostAt,
-          },
-        );
-
-        if (posted) {
-          job.accountSeen.add(job.sourcePostId);
-          job.seenPosts[job.sourceUsername] = [...job.accountSeen];
-          saveSeenPosts(job.seenPosts);
-          updateSourceAccountCheck(job.sourceUsername, {
-            totalSeenPosts: job.accountSeen.size,
-          });
-        }
-
-        for (const filePath of job.mediaPaths) {
-          if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-        }
-
-        await delay(3000);
-      } catch (err) {
-        addLog('error', `Repost batch failed for @${job.sourceUsername}/${job.sourcePostId}: ${err.message}`);
-      }
-    }
-  } finally {
-    await reopenScannerSession();
-    addLog('info', 'Scanner profile reopened');
-  }
 }
 
 async function runAutomationLoop() {
