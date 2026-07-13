@@ -42,10 +42,17 @@ async function getDashboardAccounts() {
 }
 
 function createDashboardServer(port = 3000) {
+  const DASHBOARD_VERSION = String(process.env.DASHBOARD_VERSION || 'v1').toLowerCase() === 'v2' ? 'v2' : 'v1';
   const app = express();
   app.use(cors());
   app.use(express.json({ limit: '5mb' }));
-  app.use(express.static(path.join(__dirname, '..', 'public')));
+
+  app.get('/', (_req, res) => {
+    const file = DASHBOARD_VERSION === 'v2' ? 'monitor.html' : 'index.html';
+    res.sendFile(path.join(__dirname, '..', 'public', file));
+  });
+
+  app.use(express.static(path.join(__dirname, '..', 'public'), { index: false }));
 
   app.get('/api/status', (_req, res) => {
     res.json(getPublicState());
@@ -153,7 +160,7 @@ function createDashboardServer(port = 3000) {
   registerRemoteLogin(server);
 
   server.listen(port, () => {
-    console.log(`Dashboard: http://localhost:${port}`);
+    console.log(`Dashboard (${DASHBOARD_VERSION}): http://localhost:${port}`);
   });
 
   return { app, server };

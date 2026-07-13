@@ -16,7 +16,11 @@ const {
   updatePostingAccount,
   recordRepost,
   recordRepostFailure,
+  recordAlert,
   setAutomationEnabled,
+  setPostingEnabled,
+  setDashboardVersion,
+  setAlertChannels,
 } = require('./lib/store');
 const {
   getScannerContext,
@@ -31,6 +35,7 @@ const {
   SCANNER_PROFILE_ID,
 } = require('./lib/browser');
 const { createDashboardServer } = require('./server/dashboard');
+const { sendNewThreadAlert, listConfiguredChannels } = require('./lib/alerts');
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -54,6 +59,8 @@ function parseEnvBool(value, defaultValue = false) {
 }
 
 const AUTOMATION_ENABLED = parseEnvBool(process.env.AUTOMATION, false);
+const POSTING_ENABLED = parseEnvBool(process.env.POSTING_ENABLED, false);
+const DASHBOARD_VERSION = String(process.env.DASHBOARD_VERSION || 'v1').toLowerCase() === 'v2' ? 'v2' : 'v1';
 
 function loadSeenPosts() {
   if (!fs.existsSync(SEEN_POSTS_FILE)) return {};
@@ -572,7 +579,7 @@ async function syncKameleoDashboardAccounts() {
 }
 
 async function processPendingReposts(pendingReposts) {
-  if (!pendingReposts.length) return;
+  if (!pendingReposts.length || !POSTING_ENABLED) return;
 
   addLog('info', `Scan complete — reposting ${pendingReposts.length} post(s) via Kameleo client profiles`);
   await closeScannerSession();
@@ -659,6 +666,90 @@ async function processPendingReposts(pendingReposts) {
   }
 }
 
+async function markJobsSeen(jobs) {
+  for (const job of jobs) {
+    job.accountSeen.add(job.sourcePostId);
+    job.seenPosts[job.sourceUsername] = [...job.accountSeen];
+    saveSeenPosts(job.seenPosts);
+    updateSourceAccountCheck(job.sourceUsername, {
+      totalSeenPosts: job.accountSeen.size,
+    });
+
+    for (const filePath of job.mediaPaths || []) {
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    }
+  }
+}
+
+async function processPendingAlerts(pendingJobs) {
+  if (!pendingJobs.length) return;
+
+  addLog('info', `Sending alerts for ${pendingJobs.length} new post(s)`, { category: 'scanner' });
+
+  const alertSucceeded = pendingJobs.map(() => false);
+
+  for (let i = 0; i < pendingJobs.length; i++) {
+    const job = pendingJobs[i];
+    try {
+      const result = await sendNewThreadAlert(job);
+      const channels = result.channels || ['dashboard'];
+      recordAlert({
+        sourceUsername: job.sourceUsername,
+        sourcePostId: job.sourcePostId,
+        sourcePostUrl: job.sourcePostUrl,
+        sourcePostAt: job.sourcePostAt,
+        topic: job.topic || null,
+        textPreview: (job.repostText || '').slice(0, 200),
+        channels,
+        success: true,
+      });
+      addLog('success', `Alert sent for @${job.sourceUsername} via ${channels.join(', ')}`, {
+        category: 'alert',
+        sourcePostUrl: job.sourcePostUrl,
+      });
+      alertSucceeded[i] = true;
+    } catch (err) {
+      recordAlert({
+        sourceUsername: job.sourceUsername,
+        sourcePostId: job.sourcePostId,
+        sourcePostUrl: job.sourcePostUrl,
+        sourcePostAt: job.sourcePostAt,
+        topic: job.topic || null,
+        textPreview: (job.repostText || '').slice(0, 200),
+        channels: [],
+        success: false,
+        error: err.message,
+      });
+      addLog('error', `Alert failed for @${job.sourceUsername}: ${err.message}`, {
+        category: 'alert',
+        sourcePostUrl: job.sourcePostUrl,
+      });
+    }
+  }
+
+  if (!POSTING_ENABLED) {
+    const succeededJobs = pendingJobs.filter((_, i) => alertSucceeded[i]);
+    await markJobsSeen(succeededJobs);
+    if (succeededJobs.length) {
+      addLog('info', 'Posting disabled — marked alerted posts as seen', { category: 'scanner' });
+    }
+  }
+}
+
+async function processNewPosts(pendingJobs) {
+  if (!pendingJobs.length) return;
+
+  await processPendingAlerts(pendingJobs);
+
+  if (POSTING_ENABLED) {
+    await processPendingReposts(pendingJobs);
+  } else {
+    addLog('info', 'Posting disabled (POSTING_ENABLED=false) — monitor + alerts only', {
+      category: 'scanner',
+    });
+  }
+}
+
 async function checkAccount(page, username, collector) {
   const seenPosts = loadSeenPosts();
   const accountSeen = new Set(seenPosts[username] || []);
@@ -702,7 +793,9 @@ async function checkAccount(page, username, collector) {
     try {
       const detail = await fetchPostDetail(page, post);
       const repostText = formatRepostText(detail);
-      const mediaPaths = await downloadMedia(detail.mediaUrls || []);
+      const mediaPaths = POSTING_ENABLED
+        ? await downloadMedia(detail.mediaUrls || [])
+        : [];
 
       if (!repostText && !mediaPaths.length) {
         addLog('warn', `Skipping @${username}/${post.id}: no text or media found`);
@@ -756,7 +849,18 @@ async function runAutomationLoop() {
   let collector = createGraphQLCollector(page);
 
   addLog('success', `Monitoring ${MONITORED_ACCOUNTS.map((u) => `@${u}`).join(', ')}`);
-  addLog('info', `${repostProfiles.length} Kameleo repost profile(s)`);
+  addLog('info', `Mode: ${POSTING_ENABLED ? 'scan + alert + post' : 'scan + alert only (posting paused)'}`, {
+    category: 'scanner',
+  });
+  const channels = listConfiguredChannels();
+  addLog('info', channels.length
+    ? `Alert channels: ${channels.join(', ')}`
+    : 'No external alert channels configured — alerts logged to dashboard only', {
+    category: 'scanner',
+  });
+  if (POSTING_ENABLED) {
+    addLog('info', `${repostProfiles.length} Kameleo repost profile(s)`);
+  }
   addLog('info', `Poll interval: ${POLL_INTERVAL_MS / 60000} minutes`);
   setMonitorStatus('idle');
 
@@ -776,9 +880,9 @@ async function runAutomationLoop() {
       }
     }
 
-    await processPendingReposts(pendingReposts);
+    await processNewPosts(pendingReposts);
 
-    if (pendingReposts.length) {
+    if (pendingReposts.length && POSTING_ENABLED) {
       await page.close().catch(() => {});
       collector.detach?.();
       const scannerContext = await getScannerContext();
@@ -786,7 +890,7 @@ async function runAutomationLoop() {
       collector = createGraphQLCollector(page);
     }
 
-    if (isKameleoEnabled()) {
+    if (isKameleoEnabled() && POSTING_ENABLED) {
       try {
         repostProfiles = await syncKameleoDashboardAccounts();
         const refreshTargets = repostProfiles.filter((p) => isPostingAllowed(p.username));
@@ -838,6 +942,9 @@ async function start() {
   initSourceAccounts(MONITORED_ACCOUNTS);
   setPollInterval(POLL_INTERVAL_MS);
   setAutomationEnabled(AUTOMATION_ENABLED);
+  setPostingEnabled(POSTING_ENABLED);
+  setDashboardVersion(DASHBOARD_VERSION);
+  setAlertChannels(listConfiguredChannels());
 
   if (!AUTOMATION_ENABLED) {
     setMonitorStatus('idle');
@@ -853,12 +960,15 @@ async function start() {
       }
     }
 
-    console.log(`Dashboard: http://localhost:${DASHBOARD_PORT} (automation off)`);
+    console.log(`Dashboard (${DASHBOARD_VERSION}): http://localhost:${DASHBOARD_PORT} (automation off)`);
     return;
   }
 
   setMonitorStatus('starting');
-  addLog('info', 'Automation enabled (AUTOMATION=true)');
+  addLog('info', 'Automation enabled (AUTOMATION=true)', { category: 'scanner' });
+  if (!POSTING_ENABLED) {
+    addLog('info', 'Posting paused (POSTING_ENABLED=false)', { category: 'scanner' });
+  }
   await runAutomationLoop();
 }
 

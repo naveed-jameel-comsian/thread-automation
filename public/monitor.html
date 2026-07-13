@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Threads Scanner Monitor</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/monitor.css">
+</head>
+<body>
+  <div class="app monitor-app">
+    <header class="topbar">
+      <div class="brand">
+        <h1>Threads Scanner</h1>
+        <p class="subtitle" id="subtitle">Monitor source accounts · alert on new posts</p>
+      </div>
+      <div class="monitor-header-right">
+        <span class="mode-pill" id="postingModePill">Posting paused</span>
+        <div class="monitor-badge" id="monitorBadge">
+          <span class="pulse"></span>
+          <span id="monitorStatus">Starting</span>
+        </div>
+      </div>
+    </header>
+
+    <section class="kpi-row monitor-kpi" id="kpiRow"></section>
+
+    <section class="monitor-grid">
+      <article class="panel">
+        <h2>Source accounts</h2>
+        <div id="sourceAccounts" class="source-list"></div>
+      </article>
+
+      <article class="panel">
+        <h2>Latest alert</h2>
+        <div id="lastAlert" class="empty">No alerts yet</div>
+      </article>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Alert history</h2>
+        <span class="panel-meta" id="alertCount">0 alerts</span>
+      </div>
+      <div id="alertHistory" class="alert-list"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Scanner log</h2>
+        <span class="panel-meta">Alerts, scans, and monitor events</span>
+      </div>
+      <div id="scannerLog" class="log-list"></div>
+    </section>
+  </div>
+
+  <script src="/monitor.js"></script>
+</body>
+</html>
