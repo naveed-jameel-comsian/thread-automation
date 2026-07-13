@@ -830,6 +830,27 @@ async function checkAccount(page, username, collector) {
   return pendingReposts;
 }
 
+async function closeAllContextPages(context) {
+  await Promise.all(context.pages().map((p) => p.close().catch(() => {})));
+}
+
+/** One scanner tab per check — close all pages before and after each scan cycle. */
+async function withScannerPage(fn) {
+  const context = await getScannerContext();
+  await closeAllContextPages(context);
+
+  const page = await context.newPage();
+  const collector = createGraphQLCollector(page);
+
+  try {
+    return await fn(page, collector);
+  } finally {
+    collector.detach?.();
+    await page.close().catch(() => {});
+    await closeAllContextPages(context);
+  }
+}
+
 async function runAutomationLoop() {
   let repostProfiles = [];
 
@@ -843,10 +864,6 @@ async function runAutomationLoop() {
       addLog('warn', `Kameleo unavailable: ${err.message}. Posting needs Kameleo CLI at ${process.env.KAMELEO_API_URL || 'http://localhost:5050'}`);
     }
   }
-
-  const context = await getScannerContext();
-  let page = await context.newPage();
-  let collector = createGraphQLCollector(page);
 
   addLog('success', `Monitoring ${MONITORED_ACCOUNTS.map((u) => `@${u}`).join(', ')}`);
   addLog('info', `Mode: ${POSTING_ENABLED ? 'scan + alert + post' : 'scan + alert only (posting paused)'}`, {
@@ -869,64 +886,49 @@ async function runAutomationLoop() {
 
     const pendingReposts = [];
 
-    for (const username of MONITORED_ACCOUNTS) {
-      try {
-        const queued = await checkAccount(page, username, collector);
-        pendingReposts.push(...queued);
-      } catch (err) {
-        updateSourceAccountError(username, err.message);
-        addLog('error', `Error checking @${username}: ${err.message}`);
-        console.error(`Error checking @${username}:`, err.message);
+    await withScannerPage(async (page, collector) => {
+      for (const username of MONITORED_ACCOUNTS) {
+        try {
+          const queued = await checkAccount(page, username, collector);
+          pendingReposts.push(...queued);
+        } catch (err) {
+          updateSourceAccountError(username, err.message);
+          addLog('error', `Error checking @${username}: ${err.message}`);
+          console.error(`Error checking @${username}:`, err.message);
+        }
       }
-    }
+    });
 
     await processNewPosts(pendingReposts);
-
-    if (pendingReposts.length && POSTING_ENABLED) {
-      await page.close().catch(() => {});
-      collector.detach?.();
-      const scannerContext = await getScannerContext();
-      page = await scannerContext.newPage();
-      collector = createGraphQLCollector(page);
-    }
 
     if (isKameleoEnabled() && POSTING_ENABLED) {
       try {
         repostProfiles = await syncKameleoDashboardAccounts();
         const refreshTargets = repostProfiles.filter((p) => isPostingAllowed(p.username));
 
-        if (refreshTargets.length) {
-          await page.close().catch(() => {});
-          collector.detach?.();
-
+        for (const profile of refreshTargets) {
           try {
-            for (const profile of refreshTargets) {
+            await withRepostProfile(profile.username, async (context) => {
+              const accountPage = await context.newPage();
               try {
-                await withRepostProfile(profile.username, async (context) => {
-                  const accountPage = await context.newPage();
-                  try {
-                    const accountCollector = createGraphQLCollector(accountPage);
-                    await refreshPostingAccountProfile(accountPage, profile.username, accountCollector);
-                  } finally {
-                    await accountPage.close().catch(() => {});
-                  }
-                }, profile.id);
-              } catch (err) {
-                updatePostingAccount(profile.username, {
-                  status: 'stalled',
-                  lastError: err.message,
-                });
-                addLog('warn', `Could not refresh @${profile.username}: ${err.message}`);
+                const accountCollector = createGraphQLCollector(accountPage);
+                await refreshPostingAccountProfile(accountPage, profile.username, accountCollector);
+              } finally {
+                await accountPage.close().catch(() => {});
               }
-            }
-          } finally {
-            const scannerContext = await reopenScannerSession();
-            page = await scannerContext.newPage();
-            collector = createGraphQLCollector(page);
+            }, profile.id);
+          } catch (err) {
+            updatePostingAccount(profile.username, {
+              status: 'stalled',
+              lastError: err.message,
+            });
+            addLog('warn', `Could not refresh @${profile.username}: ${err.message}`);
           }
         }
       } catch (err) {
         addLog('warn', `Could not sync Kameleo profiles: ${err.message}`);
+      } finally {
+        await closeScannerSession();
       }
     }
 
